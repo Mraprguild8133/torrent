@@ -1,13 +1,18 @@
 # ------------------ config.py ------------------
-#
-# This file holds the configuration for your Telegram bot.
-# Keeping your token in a separate file like this is a good security practice.
-#
-# INSTRUCTIONS:
-# 1. Get your Telegram Bot Token from @BotFather on Telegram.
-# 2. Replace "YOUR_TELEGRAM_BOT_TOKEN_HERE" with your actual token.
-#
-# Example:
-# TELEGRAM_BOT_TOKEN = "1234567890:ABCdEFGHIjklMNOpqrSTUvwxYZ-12345"
+# Configuration file for the Telegram Torrent Analyzer Bot
 
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+# Your Telegram Bot Token from @BotFather
+TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+
+# Optional: Additional configuration options
+BOT_CONFIG = {
+    "admin_ids": [],  # Add admin user IDs if needed
+    "max_file_size": 10 * 1024 * 1024,  # 10MB in bytes
+    "allowed_trackers": [
+        "tracker.openbittorrent.com",
+        "tracker.leechers-paradise.org", 
+        "open.nyaatorrents.info",
+        "exodus.desync.com",
+        "tracker.publicbt.com"
+    ]
+}
