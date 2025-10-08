@@ -7,7 +7,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 API_KEY = os.environ.get("API_KEY", "")  # For new27.gdtot.dad
 
 # GDTOT API Configuration
-GDTOT_API_URL = "https://new27.gdtot.dad/api/upload"
+GDTOT_API_URL = "https://new.gdtot.com/api/upload/link"
 
 # Bot Settings
 MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024  # 4GB in bytes
