@@ -1,2 +1,3 @@
-python-telegram-bot==21.0.1
-bencode.py==4.0.0
+pyrogram
+tgcrypto
+httpx
