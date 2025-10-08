@@ -2,7 +2,7 @@
 # Configuration file for the Telegram Torrent Analyzer Bot
 
 # Your Telegram Bot Token from @BotFather
-TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+TELEGRAM_BOT_TOKEN = "7776143869:AAHOK5ld7Y-Z_in2KOKG7VBR9iDlz6Bt6b4"
 
 # Optional: Additional configuration options
 BOT_CONFIG = {
