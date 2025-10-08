@@ -6,12 +6,13 @@ import httpx
 import shutil
 import logging
 import re
+import json
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import *
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Validate configuration on startup
@@ -54,47 +55,6 @@ def is_google_drive_link(url: str) -> bool:
     ]
     return any(re.search(pattern, url) for pattern in patterns)
 
-def extract_file_id(gdrive_url: str) -> str:
-    """Extract file ID from Google Drive URL."""
-    patterns = [
-        r'/file/d/([a-zA-Z0-9_-]+)',
-        r'/open\?id=([a-zA-Z0-9_-]+)',
-        r'uc\?export=download&id=([a-zA-Z0-9_-]+)'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, gdrive_url)
-        if match:
-            return match.group(1)
-    return None
-
-async def progress_callback(current, total, message: Message, start_time, action: str):
-    """Updates the progress message."""
-    now = time.time()
-    diff = now - start_time
-    if round(diff % 5.00) == 0 or current == total:
-        percentage = current * 100 / total
-        speed = current / diff
-        elapsed_time = round(diff)
-        eta = round((total - current) / speed) if speed > 0 else 0
-        
-        progress_bar = "[{0}{1}]".format(
-            ''.join(["⬢" for _ in range(math.floor(percentage / 10))]),
-            ''.join(["⬡" for _ in range(10 - math.floor(percentage / 10))])
-        )
-
-        try:
-            await message.edit_text(
-                f"**{action}**\n"
-                f"{progress_bar} {percentage:.2f}%\n"
-                f"➢ **Size:** {humanbytes(total)}\n"
-                f"➢ **Processed:** {humanbytes(current)}\n"
-                f"➢ **Speed:** {humanbytes(speed)}/s\n"
-                f"➢ **ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}"
-            )
-        except Exception:
-            pass
-
 # --------------------------------- #
 # --- GDTOT UPLOAD HANDLER --- #
 # --------------------------------- #
@@ -106,66 +66,94 @@ async def upload_gdrive_to_gdtot(gdrive_url: str, message: Message) -> str:
     await message.edit_text("🔗 **Processing Google Drive Link...**")
     
     try:
-        # Prepare the request data
+        # Prepare the request data EXACTLY as in the PHP example
         data = {
             "email": GDTOT_EMAIL,
             "api_token": API_KEY,
             "url": gdrive_url
         }
         
-        logger.info(f"Uploading GDrive link: {gdrive_url}")
+        logger.info(f"Attempting to upload GDrive link: {gdrive_url}")
+        logger.info(f"Using email: {GDTOT_EMAIL}")
+        logger.info(f"Using API token: {API_KEY[:8]}...")  # Log only first 8 chars for security
         
         headers = {
             'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json'
         }
         
         async with httpx.AsyncClient(timeout=60.0) as client:
+            logger.info(f"Sending POST request to: {GDTOT_API_URL}")
+            logger.info(f"Request data: {json.dumps(data, indent=2)}")
+            
             response = await client.post(
                 GDTOT_API_URL,
                 json=data,
                 headers=headers
             )
             
-            logger.info(f"API Response Status: {response.status_code}")
-            logger.info(f"API Response: {response.text}")
+            logger.info(f"Response Status Code: {response.status_code}")
+            logger.info(f"Response Headers: {dict(response.headers)}")
+            logger.info(f"Full Response Text: {response.text}")
             
-            response.raise_for_status()
-            response_data = response.json()
+            # Try to parse JSON response
+            try:
+                response_data = response.json()
+                logger.info(f"Parsed JSON Response: {json.dumps(response_data, indent=2)}")
+            except Exception as json_error:
+                logger.error(f"JSON Parse Error: {json_error}")
+                logger.error(f"Raw Response: {response.text}")
+                await message.edit_text(f"**API Response Error:** Could not parse response as JSON")
+                return None
             
-            # Parse the response based on expected format
-            if response_data.get("status") == "success":
-                gdtot_link = response_data.get("gdtot_link") or response_data.get("url") or response_data.get("download_url")
-                if gdtot_link:
-                    return gdtot_link
-                else:
-                    await message.edit_text("❌ **Upload successful but no link returned**")
-                    return None
+            # Check for different success scenarios
+            if response.status_code == 200:
+                # Check various possible success indicators
+                if response_data.get("status") == "success":
+                    gdtot_link = (response_data.get("gdtot_link") or 
+                                 response_data.get("url") or 
+                                 response_data.get("download_url") or
+                                 response_data.get("link"))
+                    if gdtot_link:
+                        logger.info(f"Success! GDTOT Link: {gdtot_link}")
+                        return gdtot_link
+                
+                # Check for error messages
+                error_msg = (response_data.get("message") or 
+                           response_data.get("error") or 
+                           response_data.get("msg") or
+                           "Unknown error occurred")
+                
+                await message.edit_text(f"**API Error:** {error_msg}")
+                return None
+                
             else:
-                error_msg = response_data.get("message", response_data.get("error", "Unknown error"))
-                await message.edit_text(f"**Upload Failed:** {error_msg}")
+                error_msg = f"HTTP {response.status_code}"
+                if response_data.get("message"):
+                    error_msg += f" - {response_data.get('message')}"
+                elif response_data.get("error"):
+                    error_msg += f" - {response_data.get('error')}"
+                
+                await message.edit_text(f"**Server Error:** {error_msg}")
                 return None
                 
     except httpx.HTTPStatusError as e:
-        error_msg = f"**HTTP Error {e.response.status_code}**"
-        try:
-            error_data = e.response.json()
-            error_msg += f"\n`{error_data}`"
-        except:
-            error_msg += f"\n`{e.response.text}`"
+        logger.error(f"HTTPStatusError: {e}")
+        logger.error(f"Response: {e.response.text if e.response else 'No response'}")
         
+        error_msg = f"**HTTP Error {e.response.status_code if e.response else 'Unknown'}**"
         await message.edit_text(error_msg)
-        logger.error(f"HTTP Error: {e}")
         return None
         
     except httpx.RequestError as e:
-        await message.edit_text("**Network Error:** Failed to connect to GDTOT service")
-        logger.error(f"Network Error: {e}")
+        logger.error(f"RequestError: {e}")
+        await message.edit_text("**Network Error:** Cannot connect to GDTOT service. Please check your internet connection.")
         return None
         
     except Exception as e:
-        await message.edit_text(f"**Upload Error:** {str(e)}")
-        logger.error(f"Upload Error: {e}")
+        logger.error(f"Unexpected Error: {e}", exc_info=True)
+        await message.edit_text(f"**Unexpected Error:** {str(e)}")
         return None
 
 # --------------------- #
@@ -182,9 +170,104 @@ async def start_handler(_, message: Message):
         "1. Send a Google Drive share link\n"
         "2. Or use /gdrive command with your link\n"
         "3. I'll convert it to a GDTOT download link\n\n"
-        "**Supported:** Google Drive file links",
+        "**Commands:**\n"
+        "/gdrive <link> - Convert Google Drive link\n"
+        "/test - Check API status\n"
+        "/debug - Show configuration\n"
+        "/start - Show this help",
         quote=True
     )
+
+@app.on_message(filters.command("debug"))
+async def debug_handler(_, message: Message):
+    """Show debug information"""
+    debug_info = f"""
+**🔧 Debug Information:**
+
+**API Configuration:**
+• Domain: `{GDTOT_DOMAIN}`
+• API URL: `{GDTOT_API_URL}`
+• Email: `{GDTOT_EMAIL}`
+• API Key: `{API_KEY[:8]}...` (first 8 chars)
+
+**Bot Status:**
+• API ID: `{API_ID}`
+• API Hash: `{API_HASH[:8]}...`
+• Bot Token: `{BOT_TOKEN[:8]}...`
+
+**To test your configuration:**
+1. Use `/test` to check API connectivity
+2. Use `/gdrive <link>` with a test Google Drive link
+    """
+    
+    await message.reply_text(debug_info, quote=True)
+
+@app.on_message(filters.command("test"))
+async def test_handler(_, message: Message):
+    """Test command to check API connectivity with detailed logging"""
+    test_message = await message.reply_text("🔧 **Testing GDTOT API Connection...**", quote=True)
+    
+    try:
+        # Test with a simple request to check if domain is accessible
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # First test if domain is reachable
+            domain_test = await client.get(GDTOT_DOMAIN, follow_redirects=True)
+            domain_status = "✅ Reachable" if domain_test.status_code == 200 else "❌ Unreachable"
+            
+            # Now test the API with minimal data
+            test_data = {
+                "email": GDTOT_EMAIL,
+                "api_token": API_KEY,
+                "url": "https://drive.google.com/file/d/test123/view"  # dummy link for testing
+            }
+            
+            api_response = await client.post(
+                GDTOT_API_URL,
+                json=test_data,
+                headers={'Content-Type': 'application/json'},
+                timeout=30.0
+            )
+            
+            api_status = "✅ Responding" if api_response.status_code in [200, 201, 400, 422] else "❌ Not Responding"
+            
+            result_text = f"""
+**🧪 API Test Results:**
+
+**Domain Test:**
+• Status: {domain_status}
+• Code: {domain_test.status_code}
+
+**API Test:**
+• Status: {api_status}
+• Code: {api_response.status_code}
+
+**Configuration:**
+• Email: {'✅ Set' if GDTOT_EMAIL else '❌ Missing'}
+• API Key: {'✅ Set' if API_KEY else '❌ Missing'}
+
+**Next Steps:**
+If domain is reachable but API fails, check:
+1. Your API key is valid
+2. Your email is registered with GDTOT
+3. The API endpoint is correct
+            """
+            
+            await test_message.edit_text(result_text)
+            
+    except Exception as e:
+        await test_message.edit_text(f"""
+**❌ Test Failed:**
+
+**Error:** {str(e)}
+
+**Possible Issues:**
+1. Domain {GDTOT_DOMAIN} is not accessible
+2. Network connectivity problem
+3. SSL certificate issue
+4. Server is down
+
+Please check the domain manually in your browser.
+        """)
 
 @app.on_message(filters.command("gdrive"))
 async def gdrive_handler(_, message: Message):
@@ -193,7 +276,8 @@ async def gdrive_handler(_, message: Message):
         await message.reply_text(
             "**Usage:** `/gdrive <google_drive_link>`\n\n"
             "**Example:**\n"
-            "`/gdrive https://drive.google.com/file/d/1ABC123xyz/view`",
+            "`/gdrive https://drive.google.com/file/d/1ABC123xyz/view`\n\n"
+            "**Note:** The link must be a shareable Google Drive file link.",
             quote=True
         )
         return
@@ -204,13 +288,17 @@ async def gdrive_handler(_, message: Message):
         await message.reply_text(
             "❌ **Invalid Google Drive Link**\n\n"
             "Please provide a valid Google Drive file link.\n"
-            "**Format:** `https://drive.google.com/file/d/FILE_ID/view`",
+            "**Accepted formats:**\n"
+            "• `https://drive.google.com/file/d/FILE_ID/view`\n"
+            "• `https://drive.google.com/open?id=FILE_ID`\n"
+            "• `https://docs.google.com/uc?export=download&id=FILE_ID`",
             quote=True
         )
         return
     
     status_message = await message.reply_text(
-        "🔗 **Validating Google Drive Link...**",
+        f"🔗 **Processing Google Drive Link...**\n\n"
+        f"**URL:** `{gdrive_url}`",
         quote=True
     )
     
@@ -221,51 +309,20 @@ async def gdrive_handler(_, message: Message):
         await status_message.edit_text(
             f"**✅ Conversion Successful!**\n\n"
             f"**Original Link:**\n`{gdrive_url}`\n\n"
-            f"**GDTOT Link:**\n{gdtot_link}\n\n"
+            f"**GDTOT Download Link:**\n{gdtot_link}\n\n"
             f"💡 *Share this GDTOT link for downloads*",
             disable_web_page_preview=True
         )
     else:
         await status_message.edit_text(
             "❌ **Conversion Failed**\n\n"
-            "Possible reasons:\n"
-            "• Invalid Google Drive link\n"
-            "• File not accessible\n"
-            "• GDTOT service issue\n"
-            "• API limit reached"
+            "**Troubleshooting Steps:**\n"
+            "1. Use `/test` to check API status\n"
+            "2. Use `/debug` to verify configuration\n"
+            "3. Ensure the Google Drive link is public\n"
+            "4. Check if your API key is valid\n"
+            "5. Try again in a few minutes"
         )
-
-@app.on_message(filters.command("test"))
-async def test_handler(_, message: Message):
-    """Test command to check API connectivity"""
-    await message.reply_text("🔧 **Testing GDTOT API Connection...**", quote=True)
-    
-    try:
-        # Test data
-        test_data = {
-            "email": GDTOT_EMAIL,
-            "api_token": API_KEY,
-            "url": "https://drive.google.com/file/d/test/view"
-        }
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                GDTOT_API_URL,
-                json=test_data,
-                headers={'Content-Type': 'application/json'}
-            )
-            
-            status = "✅ Online" if response.status_code in [200, 201] else "❌ Offline"
-            
-            await message.reply_text(
-                f"**GDTOT API Status:** {status}\n"
-                f"**Response Code:** {response.status_code}\n"
-                f"**Email Configured:** {'✅ Yes' if GDTOT_EMAIL else '❌ No'}\n"
-                f"**API Key Configured:** {'✅ Yes' if API_KEY else '❌ No'}",
-                quote=True
-            )
-    except Exception as e:
-        await message.reply_text(f"**Connection Test Failed:** {str(e)}", quote=True)
 
 @app.on_message(filters.text & filters.private)
 async def text_handler(_, message: Message):
@@ -291,10 +348,7 @@ async def text_handler(_, message: Message):
         else:
             await status_message.edit_text(
                 "❌ **Conversion Failed**\n\n"
-                "Please check:\n"
-                "• The Google Drive link is valid and public\n"
-                "• Your API credentials are correct\n"
-                "• Try again later"
+                "Use `/test` to diagnose the issue or try again later."
             )
 
 # ----------------- #
@@ -302,7 +356,8 @@ async def text_handler(_, message: Message):
 # ----------------- #
 if __name__ == "__main__":
     print("🚀 GDTOT Bot is starting...")
-    print(f"✅ Email: {GDTOT_EMAIL}")
-    print(f"✅ API Key: {'Configured' if API_KEY else 'NOT CONFIGURED'}")
+    print(f"📧 Email: {GDTOT_EMAIL}")
+    print(f"🔑 API Key: {API_KEY[:8]}...")
+    print(f"🌐 Domain: {GDTOT_DOMAIN}")
     print("🤖 Bot is ready to convert Google Drive links")
     app.run()
