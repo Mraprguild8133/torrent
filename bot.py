@@ -5,6 +5,7 @@ import asyncio
 import httpx
 import shutil
 import logging
+import re
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import *
@@ -44,6 +45,29 @@ def humanbytes(size):
         n += 1
     return f"{size:.2f} {power_labels[n]}"
 
+def is_google_drive_link(url: str) -> bool:
+    """Check if the URL is a valid Google Drive link."""
+    patterns = [
+        r'https?://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)',
+        r'https?://drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)',
+        r'https?://docs\.google\.com/uc\?export=download&id=([a-zA-Z0-9_-]+)'
+    ]
+    return any(re.search(pattern, url) for pattern in patterns)
+
+def extract_file_id(gdrive_url: str) -> str:
+    """Extract file ID from Google Drive URL."""
+    patterns = [
+        r'/file/d/([a-zA-Z0-9_-]+)',
+        r'/open\?id=([a-zA-Z0-9_-]+)',
+        r'uc\?export=download&id=([a-zA-Z0-9_-]+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, gdrive_url)
+        if match:
+            return match.group(1)
+    return None
+
 async def progress_callback(current, total, message: Message, start_time, action: str):
     """Updates the progress message."""
     now = time.time()
@@ -64,7 +88,7 @@ async def progress_callback(current, total, message: Message, start_time, action
                 f"**{action}**\n"
                 f"{progress_bar} {percentage:.2f}%\n"
                 f"➢ **Size:** {humanbytes(total)}\n"
-                f"➢ **Downloaded:** {humanbytes(current)}\n"
+                f"➢ **Processed:** {humanbytes(current)}\n"
                 f"➢ **Speed:** {humanbytes(speed)}/s\n"
                 f"➢ **ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}"
             )
@@ -75,74 +99,52 @@ async def progress_callback(current, total, message: Message, start_time, action
 # --- GDTOT UPLOAD HANDLER --- #
 # --------------------------------- #
 
-async def upload_to_gdtot(file_path: str, message: Message) -> str:
+async def upload_gdrive_to_gdtot(gdrive_url: str, message: Message) -> str:
     """
-    Uploads the file to new27.gdtot.dad and returns the shareable link.
+    Uploads Google Drive link to GDTOT and returns the GDTOT link.
     """
-    await message.edit_text("☁️ **Uploading to GDTOT Storage...**")
+    await message.edit_text("🔗 **Processing Google Drive Link...**")
     
     try:
-        file_name = os.path.basename(file_path)
-        file_size = os.path.getsize(file_path)
+        # Prepare the request data
+        data = {
+            "email": GDTOT_EMAIL,
+            "api_token": API_KEY,
+            "url": gdrive_url
+        }
         
-        logger.info(f"Uploading file: {file_name} ({humanbytes(file_size)})")
+        logger.info(f"Uploading GDrive link: {gdrive_url}")
         
-        # First, let's test the API connection with a simple request
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Test API connectivity
-            test_response = await client.get("https://new27.gdtot.dad/api/status")
-            if test_response.status_code != 200:
-                await message.edit_text("❌ **API Service Unavailable**")
-                return None
-            
-        # Prepare for file upload
         headers = {
-            'X-API-KEY': API_KEY,
+            'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
-        # Upload using multipart form data
-        with open(file_path, 'rb') as file:
-            files = {
-                'file': (file_name, file, 'application/octet-stream')
-            }
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                GDTOT_API_URL,
+                json=data,
+                headers=headers
+            )
             
-            data = {
-                'key': API_KEY,
-                'type': 'file'
-            }
+            logger.info(f"API Response Status: {response.status_code}")
+            logger.info(f"API Response: {response.text}")
             
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                response = await client.post(
-                    GDTOT_API_URL,
-                    files=files,
-                    data=data,
-                    headers=headers
-                )
-                
-                logger.info(f"Upload Response Status: {response.status_code}")
-                logger.info(f"Upload Response: {response.text}")
-                
-                response.raise_for_status()
-                response_data = response.json()
-                
-                # Check different possible response formats
-                if response_data.get("status") == "success":
-                    return response_data.get("url") or response_data.get("download_url") or response_data.get("link")
-                elif response_data.get("error"):
-                    error_msg = response_data.get("message", response_data.get("error"))
-                    await message.edit_text(f"**Upload Failed:** {error_msg}")
-                    return None
+            response.raise_for_status()
+            response_data = response.json()
+            
+            # Parse the response based on expected format
+            if response_data.get("status") == "success":
+                gdtot_link = response_data.get("gdtot_link") or response_data.get("url") or response_data.get("download_url")
+                if gdtot_link:
+                    return gdtot_link
                 else:
-                    # If no clear status, but response is 200, try to extract link
-                    if response.status_code == 200:
-                        # Try to find any URL in the response
-                        for key, value in response_data.items():
-                            if isinstance(value, str) and value.startswith('http'):
-                                return value
-                    
-                    await message.edit_text(f"**Unexpected API Response:** {response_data}")
+                    await message.edit_text("❌ **Upload successful but no link returned**")
                     return None
+            else:
+                error_msg = response_data.get("message", response_data.get("error", "Unknown error"))
+                await message.edit_text(f"**Upload Failed:** {error_msg}")
+                return None
                 
     except httpx.HTTPStatusError as e:
         error_msg = f"**HTTP Error {e.response.status_code}**"
@@ -157,49 +159,13 @@ async def upload_to_gdtot(file_path: str, message: Message) -> str:
         return None
         
     except httpx.RequestError as e:
-        await message.edit_text("**Network Error:** Failed to connect to upload service")
+        await message.edit_text("**Network Error:** Failed to connect to GDTOT service")
         logger.error(f"Network Error: {e}")
         return None
         
     except Exception as e:
         await message.edit_text(f"**Upload Error:** {str(e)}")
         logger.error(f"Upload Error: {e}")
-        return None
-
-# Alternative upload method for testing
-async def test_upload_method(file_path: str, message: Message) -> str:
-    """
-    Alternative upload method with different approach
-    """
-    try:
-        file_name = os.path.basename(file_path)
-        
-        await message.edit_text("🔧 **Testing alternative upload method...**")
-        
-        headers = {
-            'Authorization': f'Bearer {API_KEY}',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        with open(file_path, 'rb') as file:
-            files = {'file': (file_name, file)}
-            
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                response = await client.post(
-                    GDTOT_API_URL,
-                    files=files,
-                    headers=headers
-                )
-                
-                logger.info(f"Alt Method Response: {response.status_code} - {response.text}")
-                
-                if response.status_code == 200:
-                    return f"https://new27.gdtot.dad/file/{file_name}"
-                else:
-                    return None
-                    
-    except Exception as e:
-        logger.error(f"Alt upload error: {e}")
         return None
 
 # --------------------- #
@@ -211,123 +177,132 @@ async def start_handler(_, message: Message):
     """Handles the /start command."""
     await message.reply_text(
         "**Welcome to GDTOT Uploader Bot!** 👋\n\n"
-        "I can help you upload files to GDTOT storage.\n"
-        "Just send me any file and I'll generate a shareable link for you.\n\n"
-        "**Max Size:** 4GB\n"
-        "**Supported:** Documents, Videos, Audio",
+        "I can convert Google Drive links to GDTOT links.\n\n"
+        "**How to use:**\n"
+        "1. Send a Google Drive share link\n"
+        "2. Or use /gdrive command with your link\n"
+        "3. I'll convert it to a GDTOT download link\n\n"
+        "**Supported:** Google Drive file links",
         quote=True
     )
+
+@app.on_message(filters.command("gdrive"))
+async def gdrive_handler(_, message: Message):
+    """Handles Google Drive link conversion."""
+    if len(message.command) < 2:
+        await message.reply_text(
+            "**Usage:** `/gdrive <google_drive_link>`\n\n"
+            "**Example:**\n"
+            "`/gdrive https://drive.google.com/file/d/1ABC123xyz/view`",
+            quote=True
+        )
+        return
+    
+    gdrive_url = message.command[1]
+    
+    if not is_google_drive_link(gdrive_url):
+        await message.reply_text(
+            "❌ **Invalid Google Drive Link**\n\n"
+            "Please provide a valid Google Drive file link.\n"
+            "**Format:** `https://drive.google.com/file/d/FILE_ID/view`",
+            quote=True
+        )
+        return
+    
+    status_message = await message.reply_text(
+        "🔗 **Validating Google Drive Link...**",
+        quote=True
+    )
+    
+    # Upload to GDTOT
+    gdtot_link = await upload_gdrive_to_gdtot(gdrive_url, status_message)
+    
+    if gdtot_link:
+        await status_message.edit_text(
+            f"**✅ Conversion Successful!**\n\n"
+            f"**Original Link:**\n`{gdrive_url}`\n\n"
+            f"**GDTOT Link:**\n{gdtot_link}\n\n"
+            f"💡 *Share this GDTOT link for downloads*",
+            disable_web_page_preview=True
+        )
+    else:
+        await status_message.edit_text(
+            "❌ **Conversion Failed**\n\n"
+            "Possible reasons:\n"
+            "• Invalid Google Drive link\n"
+            "• File not accessible\n"
+            "• GDTOT service issue\n"
+            "• API limit reached"
+        )
 
 @app.on_message(filters.command("test"))
 async def test_handler(_, message: Message):
     """Test command to check API connectivity"""
-    await message.reply_text("🔧 **Testing API Connection...**", quote=True)
+    await message.reply_text("🔧 **Testing GDTOT API Connection...**", quote=True)
     
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get("https://new27.gdtot.dad/", timeout=10)
-            status = "✅ Online" if response.status_code == 200 else "❌ Offline"
+        # Test data
+        test_data = {
+            "email": GDTOT_EMAIL,
+            "api_token": API_KEY,
+            "url": "https://drive.google.com/file/d/test/view"
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                GDTOT_API_URL,
+                json=test_data,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            status = "✅ Online" if response.status_code in [200, 201] else "❌ Offline"
             
             await message.reply_text(
-                f"**API Status:** {status}\n"
+                f"**GDTOT API Status:** {status}\n"
                 f"**Response Code:** {response.status_code}\n"
+                f"**Email Configured:** {'✅ Yes' if GDTOT_EMAIL else '❌ No'}\n"
                 f"**API Key Configured:** {'✅ Yes' if API_KEY else '❌ No'}",
                 quote=True
             )
     except Exception as e:
         await message.reply_text(f"**Connection Test Failed:** {str(e)}", quote=True)
 
-@app.on_message(filters.document | filters.video | filters.audio)
-async def file_handler(_, message: Message):
-    """Handles incoming files and processes them."""
+@app.on_message(filters.text & filters.private)
+async def text_handler(_, message: Message):
+    """Handle Google Drive links sent as text."""
+    text = message.text.strip()
     
-    media = message.document or message.video or message.audio
-    if not media:
-        await message.reply_text("Please send a valid file.", quote=True)
-        return
-
-    file_name = media.file_name or "Unknown"
-    file_size = media.file_size
-
-    if file_size > MAX_FILE_SIZE:
-        await message.reply_text("❌ **Error:** File size exceeds 4GB limit.", quote=True)
-        return
-
-    status_message = await message.reply_text(
-        f"**Processing File:**\n"
-        f"📄 **Name:** `{file_name}`\n"
-        f"📦 **Size:** {humanbytes(file_size)}\n"
-        f"⏳ **Starting download...**",
-        quote=True
-    )
-
-    download_dir = os.path.join(DOWNLOAD_PATH, str(message.id))
-    os.makedirs(download_dir, exist_ok=True)
-    
-    try:
-        # Download from Telegram with progress
-        start_time = time.time()
-        file_path = await message.download(
-            file_name=os.path.join(download_dir, file_name),
-            progress=progress_callback,
-            progress_args=(status_message, start_time, "📥 Downloading...")
+    if is_google_drive_link(text):
+        status_message = await message.reply_text(
+            "🔗 **Google Drive Link Detected!**\nConverting to GDTOT...",
+            quote=True
         )
-
-        if file_path and os.path.exists(file_path):
-            actual_size = os.path.getsize(file_path)
+        
+        # Upload to GDTOT
+        gdtot_link = await upload_gdrive_to_gdtot(text, status_message)
+        
+        if gdtot_link:
             await status_message.edit_text(
-                f"✅ **Download Complete!**\n"
-                f"📄 **File:** `{file_name}`\n"
-                f"📦 **Size:** {humanbytes(actual_size)}\n"
-                f"☁️ **Starting upload...**"
+                f"**✅ Conversion Successful!**\n\n"
+                f"**GDTOT Download Link:**\n{gdtot_link}\n\n"
+                f"💡 *Share this link for downloads*",
+                disable_web_page_preview=True
             )
-            
-            # Try main upload method
-            upload_link = await upload_to_gdtot(file_path, status_message)
-            
-            # If main method fails, try alternative
-            if not upload_link:
-                await status_message.edit_text("🔄 **Trying alternative upload method...**")
-                upload_link = await test_upload_method(file_path, status_message)
-
-            if upload_link:
-                await status_message.edit_text(
-                    f"**✅ Upload Successful!**\n\n"
-                    f"📄 **File:** `{file_name}`\n"
-                    f"📦 **Size:** {humanbytes(actual_size)}\n"
-                    f"🔗 **Download Link:** {upload_link}\n\n"
-                    f"💡 *Share this link with others*",
-                    disable_web_page_preview=False
-                )
-            else:
-                await status_message.edit_text(
-                    "❌ **Upload Failed.**\n\n"
-                    "**Possible reasons:**\n"
-                    "• API service temporary unavailable\n"
-                    "• Invalid API key\n"
-                    "• File type not supported\n"
-                    "• Network issues\n\n"
-                    "Please try again later or check your API configuration."
-                )
-
-    except Exception as e:
-        await status_message.edit_text(f"**❌ Error:** {str(e)}")
-        logger.error(f"Error processing file: {e}")
-
-    finally:
-        # Clean up downloaded files
-        if os.path.exists(download_dir):
-            try:
-                shutil.rmtree(download_dir)
-                logger.info(f"Cleaned up directory: {download_dir}")
-            except Exception as cleanup_error:
-                logger.error(f"Cleanup error: {cleanup_error}")
+        else:
+            await status_message.edit_text(
+                "❌ **Conversion Failed**\n\n"
+                "Please check:\n"
+                "• The Google Drive link is valid and public\n"
+                "• Your API credentials are correct\n"
+                "• Try again later"
+            )
 
 # ----------------- #
 # --- RUN BOT --- #
 # ----------------- #
 if __name__ == "__main__":
     print("🚀 GDTOT Bot is starting...")
+    print(f"✅ Email: {GDTOT_EMAIL}")
     print(f"✅ API Key: {'Configured' if API_KEY else 'NOT CONFIGURED'}")
-    print("🤖 Bot is ready to receive files")
+    print("🤖 Bot is ready to convert Google Drive links")
     app.run()
