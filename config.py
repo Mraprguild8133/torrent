@@ -9,7 +9,7 @@ class Config:
     BOT_TOKEN = os.environ.get('BOT_TOKEN')
     
     # AdLinkFly Configuration
-    DOMAIN_NAME = os.environ.get('DOMAIN_NAME')
+    DOMAIN_NAME = os.environ.get('www.mraprguilds.site')
     ADLINKFLY_TOKEN = os.environ.get('ADLINKFLY_TOKEN') 
     
     # Bot Messages
