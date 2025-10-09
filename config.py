@@ -9,7 +9,7 @@ class Config:
     BOT_TOKEN = os.environ.get('BOT_TOKEN')
     
     # GPLinks Configuration
-    DOMAIN_NAME = 'gplinks.in'  # GPLinks API domain
+    DOMAIN_NAME = 'www.mraprguilds.site'  # GPLinks API domain
     API_KEY = os.environ.get('ADLINKFLY_TOKEN')  # GPLinks API key
     
     # Bot Messages
