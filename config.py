@@ -9,7 +9,7 @@ class Config:
     BOT_TOKEN = os.environ.get('BOT_TOKEN')
     
     # AdLinkFly Configuration - Hardcoded domain
-    DOMAIN_NAME = 'www.mraprguilds.site'  # Hardcoded domain
+    DOMAIN_NAME = 'gplinks.com'  # Hardcoded domain
     ADLINKFLY_TOKEN = os.environ.get('ADLINKFLY_TOKEN') 
     
     # Bot Messages
