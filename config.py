@@ -1,29 +1,30 @@
 import os
-import json
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# Bot Configuration
 class Config:
-    # Telegram API Configuration
-    API_ID = int(os.environ.get("API_ID", 0))
-    API_HASH = os.environ.get("API_HASH", "")
-    BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+    # Telegram Bot Token
+    BOT_TOKEN = os.environ.get('BOT_TOKEN')
     
-    # Google Drive Configuration - Using Client ID/Secret directly
-    GDRIVE_CLIENT_ID = os.environ.get("GDRIVE_CLIENT_ID", "")
-    GDRIVE_CLIENT_SECRET = os.environ.get("GDRIVE_CLIENT_SECRET", "")
-    GDRIVE_TOKEN = os.environ.get("GDRIVE_TOKEN", "")  # Optional: Store token in env var
-    SCOPES = ['https://www.googleapis.com/auth/drive']
+    # AdLinkFly Configuration
+    DOMAIN_NAME = os.environ.get('DOMAIN_NAME')
+    ADLINKFLY_TOKEN = os.environ.get('ADLINKFLY_TOKEN') 
     
-    # Bot Configuration
-    OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-    DOWNLOAD_DIR = "./downloads/"
+    # Bot Messages
+    START_MESSAGE = (os.environ.get('START'),
+                    ('Welcome to URL Shortener Bot!\\n\\nSend me a link to shorten it.')
+    HELP_MESSAGE = (os.environ.get('HELP'),
+                   ('Help Guide:\\n\\n- Just send a link to shorten without ads\\n- Use /ads for links with ads\\n- Use /alias for custom alias without ads\\n- Use /alias_ads for custom alias with ads')
     
-    # Validation
-    def validate(self):
-        if not all([self.API_ID, self.API_HASH, self.BOT_TOKEN]):
-            raise ValueError("Missing required environment variables: API_ID, API_HASH, BOT_TOKEN")
-        if not self.GDRIVE_CLIENT_ID or not self.GDRIVE_CLIENT_SECRET:
-            raise ValueError("Missing Google Drive Client ID or Client Secret")
-        if not self.OWNER_ID:
-            print("Warning: OWNER_ID not set. Some admin features may not work.")
+    # Rate Limiting
+    MAX_REQUESTS_PER_MINUTE = 15
+    TIME_WINDOW = 60  # seconds
+    
+    # API Settings
+    API_TIMEOUT = 10  # seconds
 
-config = Config()
+# Process messages
+START = Config.START_MESSAGE.replace("\\n", "\n")
+HELP = Config.HELP_MESSAGE.replace("\\n", "\n")
