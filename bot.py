@@ -185,11 +185,14 @@ async def upload_to_drive(file_path: str, message: Message, start_time: float) -
     
     return None
 
-# --- Telegram Bot Handlers ---
-@app.on_message(filters.command("start"))
-async def start_handler(client, message: Message):
-    """Handle /start command"""
-    welcome_text = """
+# --- Bot Handlers (will be registered after app initialization) ---
+def register_handlers():
+    """Register all bot handlers"""
+    
+    @app.on_message(filters.command("start"))
+    async def start_handler(client, message: Message):
+        """Handle /start command"""
+        welcome_text = """
 🤖 **Google Drive Bot**
 
 I can help you upload files to Google Drive and download files from Google Drive links.
@@ -204,14 +207,14 @@ I can help you upload files to Google Drive and download files from Google Drive
 • Send a Google Drive link to download it here
 
 **Privacy:** Your files are only stored temporarily during transfer.
-    """
-    
-    await message.reply_text(welcome_text, parse_mode='markdown')
+        """
+        
+        await message.reply_text(welcome_text, parse_mode='markdown')
 
-@app.on_message(filters.command("help"))
-async def help_handler(client, message: Message):
-    """Handle /help command"""
-    help_text = """
+    @app.on_message(filters.command("help"))
+    async def help_handler(client, message: Message):
+        """Handle /help command"""
+        help_text = """
 📖 **How to use this bot:**
 
 **Upload to Google Drive:**
@@ -232,110 +235,110 @@ Send me a Google Drive file link and I'll download it for you.
 • Google Drive limit: 5TB
 
 **Note:** Large files may take longer to process.
-    """
-    
-    await message.reply_text(help_text, parse_mode='markdown')
+        """
+        
+        await message.reply_text(help_text, parse_mode='markdown')
 
-@app.on_message(filters.command("status"))
-async def status_handler(client, message: Message):
-    """Handle /status command"""
-    status_text = "🤖 **Bot Status**\n\n"
-    
-    # Check Google Drive connection
-    gdrive_status = "✅ Connected" if drive_service else "❌ Disconnected"
-    status_text += f"**Google Drive:** {gdrive_status}\n"
-    
-    # Check download directory
-    download_dir_status = "✅ Exists" if os.path.exists(config.DOWNLOAD_DIR) else "❌ Missing"
-    status_text += f"**Download Directory:** {download_dir_status}\n"
-    
-    # Bot uptime (simplified)
-    status_text += f"**Owner ID:** `{config.OWNER_ID or 'Not set'}`\n"
-    
-    await message.reply_text(status_text, parse_mode='markdown')
+    @app.on_message(filters.command("status"))
+    async def status_handler(client, message: Message):
+        """Handle /status command"""
+        status_text = "🤖 **Bot Status**\n\n"
+        
+        # Check Google Drive connection
+        gdrive_status = "✅ Connected" if drive_service else "❌ Disconnected"
+        status_text += f"**Google Drive:** {gdrive_status}\n"
+        
+        # Check download directory
+        download_dir_status = "✅ Exists" if os.path.exists(config.DOWNLOAD_DIR) else "❌ Missing"
+        status_text += f"**Download Directory:** {download_dir_status}\n"
+        
+        # Bot uptime (simplified)
+        status_text += f"**Owner ID:** `{config.OWNER_ID or 'Not set'}`\n"
+        
+        await message.reply_text(status_text, parse_mode='markdown')
 
-@app.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
-async def handle_file_upload(client, message: Message):
-    """Handle file uploads from Telegram to Google Drive"""
-    if not drive_service:
-        await message.reply_text("❌ Google Drive service is not available. Please contact the bot owner.")
-        return
-    
-    file_path = None
-    try:
-        start_time = time.time()
-        
-        # Initial status message
-        status_message = await message.reply_text("📥 **Downloading file...**", quote=True)
-        
-        # Download file from Telegram
-        file_path = await message.download(
-            file_name=config.DOWNLOAD_DIR,
-            progress=progress_callback,
-            progress_args=(status_message, start_time, "📥 Downloading from Telegram")
-        )
-        
-        if not file_path:
-            await status_message.edit_text("❌ Failed to download file")
+    @app.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
+    async def handle_file_upload(client, message: Message):
+        """Handle file uploads from Telegram to Google Drive"""
+        if not drive_service:
+            await message.reply_text("❌ Google Drive service is not available. Please contact the bot owner.")
             return
         
-        await status_message.edit_text("✅ Download complete! Starting upload to Google Drive...")
-        
-        # Upload to Google Drive
-        result = await upload_to_drive(file_path, status_message, start_time)
-        
-        if result:
-            file_link = result.get('webViewLink', 'N/A')
-            file_name = result.get('name', 'Unknown')
-            file_size = humanbytes(int(result.get('size', 0)))
-            
-            success_text = (
-                f"✅ **File Uploaded Successfully!**\n\n"
-                f"**File Name:** `{file_name}`\n"
-                f"**File Size:** `{file_size}`\n"
-                f"**Google Drive Link:** [Click Here]({file_link})"
-            )
-            
-            await status_message.edit_text(
-                success_text,
-                parse_mode='markdown',
-                disable_web_page_preview=True
-            )
-        else:
-            await status_message.edit_text("❌ Failed to upload file to Google Drive")
-            
-    except Exception as e:
-        error_msg = f"❌ An error occurred: {str(e)}"
+        file_path = None
         try:
-            await message.reply_text(error_msg)
-        except:
-            pass
-    finally:
-        # Clean up downloaded file
-        if file_path and os.path.exists(file_path):
+            start_time = time.time()
+            
+            # Initial status message
+            status_message = await message.reply_text("📥 **Downloading file...**", quote=True)
+            
+            # Download file from Telegram
+            file_path = await message.download(
+                file_name=config.DOWNLOAD_DIR,
+                progress=progress_callback,
+                progress_args=(status_message, start_time, "📥 Downloading from Telegram")
+            )
+            
+            if not file_path:
+                await status_message.edit_text("❌ Failed to download file")
+                return
+            
+            await status_message.edit_text("✅ Download complete! Starting upload to Google Drive...")
+            
+            # Upload to Google Drive
+            result = await upload_to_drive(file_path, status_message, start_time)
+            
+            if result:
+                file_link = result.get('webViewLink', 'N/A')
+                file_name = result.get('name', 'Unknown')
+                file_size = humanbytes(int(result.get('size', 0)))
+                
+                success_text = (
+                    f"✅ **File Uploaded Successfully!**\n\n"
+                    f"**File Name:** `{file_name}`\n"
+                    f"**File Size:** `{file_size}`\n"
+                    f"**Google Drive Link:** [Click Here]({file_link})"
+                )
+                
+                await status_message.edit_text(
+                    success_text,
+                    parse_mode='markdown',
+                    disable_web_page_preview=True
+                )
+            else:
+                await status_message.edit_text("❌ Failed to upload file to Google Drive")
+                
+        except Exception as e:
+            error_msg = f"❌ An error occurred: {str(e)}"
             try:
-                os.remove(file_path)
+                await message.reply_text(error_msg)
             except:
                 pass
+        finally:
+            # Clean up downloaded file
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
 
-@app.on_message(filters.private & filters.text)
-async def handle_text_messages(client, message: Message):
-    """Handle text messages (potential Google Drive links)"""
-    text = message.text.strip()
-    
-    # Basic Google Drive link detection
-    if 'drive.google.com' in text:
-        await message.reply_text(
-            "🔗 **Google Drive Link Detected**\n\n"
-            "Download from Google Drive feature is coming soon!\n"
-            "For now, I can only upload files to Google Drive.",
-            parse_mode='markdown'
-        )
-    else:
-        await message.reply_text(
-            "🤖 Send me a file to upload to Google Drive, or use /help for more information.",
-            parse_mode='markdown'
-        )
+    @app.on_message(filters.private & filters.text)
+    async def handle_text_messages(client, message: Message):
+        """Handle text messages (potential Google Drive links)"""
+        text = message.text.strip()
+        
+        # Basic Google Drive link detection
+        if 'drive.google.com' in text:
+            await message.reply_text(
+                "🔗 **Google Drive Link Detected**\n\n"
+                "Download from Google Drive feature is coming soon!\n"
+                "For now, I can only upload files to Google Drive.",
+                parse_mode='markdown'
+            )
+        else:
+            await message.reply_text(
+                "🤖 Send me a file to upload to Google Drive, or use /help for more information.",
+                parse_mode='markdown'
+            )
 
 # --- Application Lifecycle ---
 async def initialize_app():
@@ -374,6 +377,9 @@ async def main():
     print("✅ Bot is starting...")
     
     try:
+        # Register handlers after app is initialized
+        register_handlers()
+        
         await app.start()
         print("✅ Bot started successfully!")
         
