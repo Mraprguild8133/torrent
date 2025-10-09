@@ -27,60 +27,100 @@ if not os.path.exists(config.DOWNLOAD_DIR):
 # Global variables
 drive_service = None
 app = None
+gdrive_credentials = None
 
 # --- Google Drive Authentication ---
 def get_gdrive_service():
-    """Initialize Google Drive service with improved error handling"""
-    global drive_service
+    """Initialize Google Drive service without using token.json file"""
+    global drive_service, gdrive_credentials
     
     creds = None
     try:
-        # Load existing token
-        if os.path.exists(config.GDRIVE_TOKEN_JSON):
-            creds = Credentials.from_authorized_user_file(config.GDRIVE_TOKEN_JSON, config.SCOPES)
+        # Try to load token from environment variable first
+        if config.GDRIVE_TOKEN:
+            try:
+                token_data = json.loads(config.GDRIVE_TOKEN)
+                creds = Credentials.from_authorized_user_info(token_data, config.SCOPES)
+                print("✅ Loaded Google Drive token from environment variable")
+            except json.JSONDecodeError:
+                print("❌ Invalid GDRIVE_TOKEN format in environment variable")
         
         # Refresh or create new credentials
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
+                print("🔄 Refreshing Google Drive token...")
                 creds.refresh(Request())
+                # Update environment token if we're using one
+                if config.GDRIVE_TOKEN:
+                    print("✅ Token refreshed successfully")
             else:
-                # Handle credentials from file or environment variable
-                if os.path.exists(config.GDRIVE_CREDENTIALS_JSON):
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        config.GDRIVE_CREDENTIALS_JSON, config.SCOPES
-                    )
-                else:
-                    # Try to parse from environment variable
-                    try:
-                        creds_data = json.loads(config.GDRIVE_CREDENTIALS_JSON)
-                        flow = InstalledAppFlow.from_client_config(creds_data, config.SCOPES)
-                    except (json.JSONDecodeError, ValueError):
-                        raise ValueError("Invalid GDRIVE_CREDENTIALS_JSON format")
+                # Create client config from environment variables
+                client_config = {
+                    "web": {
+                        "client_id": config.GDRIVE_CLIENT_ID,
+                        "client_secret": config.GDRIVE_CLIENT_SECRET,
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"]
+                    }
+                }
+                
+                flow = InstalledAppFlow.from_client_config(client_config, config.SCOPES)
                 
                 print("🔐 Google Drive Authorization Required")
                 print("Please visit the following URL to authorize the application:")
                 auth_url, _ = flow.authorization_url(prompt='consent')
-                print(f"\n{auth_url}\n")
+                print(f"\n🔗 {auth_url}\n")
                 
                 code = input("Enter the authorization code: ").strip()
                 flow.fetch_token(code=code)
                 creds = flow.credentials
                 
-                # Save token for future use
-                with open(config.GDRIVE_TOKEN_JSON, 'w') as token:
-                    token.write(creds.to_json())
-                print("✅ Authorization successful! Token saved.")
+                print("✅ Authorization successful!")
+                
+                # Show token info for user to save in environment variables
+                token_info = {
+                    "token": creds.token,
+                    "refresh_token": creds.refresh_token,
+                    "token_uri": creds.token_uri,
+                    "client_id": creds.client_id,
+                    "client_secret": creds.client_secret,
+                    "scopes": creds.scopes
+                }
+                
+                print("\n💡 **Save this token to your GDRIVE_TOKEN environment variable for future use:**")
+                print(json.dumps(token_info, indent=2))
+                print("\nThis will prevent needing to re-authenticate on next startup.")
+        
+        # Store credentials globally
+        gdrive_credentials = creds
         
         drive_service = build('drive', 'v3', credentials=creds)
         
         # Test the connection
-        drive_service.about().get(fields="user").execute()
-        print("✅ Google Drive service initialized successfully")
+        about = drive_service.about().get(fields="user").execute()
+        user_email = about.get('user', {}).get('emailAddress', 'Unknown')
+        print(f"✅ Google Drive service initialized successfully")
+        print(f"📧 Connected as: {user_email}")
         return drive_service
         
     except Exception as e:
         print(f"❌ Failed to initialize Google Drive: {e}")
         return None
+
+def save_token_to_env():
+    """Save the current token back to environment variable format"""
+    if gdrive_credentials:
+        token_info = {
+            "token": gdrive_credentials.token,
+            "refresh_token": gdrive_credentials.refresh_token,
+            "token_uri": gdrive_credentials.token_uri,
+            "client_id": gdrive_credentials.client_id,
+            "client_secret": gdrive_credentials.client_secret,
+            "scopes": gdrive_credentials.scopes
+        }
+        return json.dumps(token_info)
+    return None
 
 # --- Utility Functions ---
 def humanbytes(size: int) -> str:
@@ -97,11 +137,6 @@ def humanbytes(size: int) -> str:
         power_index += 1
     
     return f"{size:.2f} {power_labels[power_index]}"
-
-def escape_markdown(text: str) -> str:
-    """Escape special characters for markdownv2"""
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
 
 async def progress_callback(current: int, total: int, message: Message, start_time: float, action: str):
     """Update progress message"""
@@ -191,7 +226,7 @@ async def upload_to_drive(file_path: str, message: Message, start_time: float) -
     
     return None
 
-# --- Bot Handlers (will be registered after app initialization) ---
+# --- Bot Handlers ---
 def register_handlers():
     """Register all bot handlers"""
     
@@ -261,6 +296,24 @@ Send me a Google Drive file link and I'll download it for you.
         """
         
         await message.reply_text(status_text)
+
+    @app.on_message(filters.command("token"))
+    async def token_handler(client, message: Message):
+        """Handle /token command to show current token info"""
+        if message.from_user.id != config.OWNER_ID:
+            await message.reply_text("❌ This command is only for the bot owner.")
+            return
+            
+        if gdrive_credentials:
+            token_json = save_token_to_env()
+            await message.reply_text(
+                f"🔑 **Current Google Drive Token:**\n\n"
+                f"```json\n{token_json}\n```\n\n"
+                f"Save this to your GDRIVE_TOKEN environment variable.",
+                parse_mode='markdown'
+            )
+        else:
+            await message.reply_text("❌ No active Google Drive token found.")
 
     @app.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
     async def handle_file_upload(client, message: Message):
