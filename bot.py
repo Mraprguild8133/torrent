@@ -9,6 +9,7 @@ from typing import Optional
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
+from pyrogram.enums import ParseMode
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -97,6 +98,11 @@ def humanbytes(size: int) -> str:
     
     return f"{size:.2f} {power_labels[power_index]}"
 
+def escape_markdown(text: str) -> str:
+    """Escape special characters for markdownv2"""
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
+
 async def progress_callback(current: int, total: int, message: Message, start_time: float, action: str):
     """Update progress message"""
     now = time.time()
@@ -125,7 +131,7 @@ async def progress_callback(current: int, total: int, message: Message, start_ti
                 f"**Elapsed:** {time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}"
             )
             
-            await message.edit_text(progress_text, parse_mode='markdown')
+            await message.edit_text(progress_text)
             
         except FloodWait as e:
             await asyncio.sleep(e.x)
@@ -209,7 +215,7 @@ I can help you upload files to Google Drive and download files from Google Drive
 **Privacy:** Your files are only stored temporarily during transfer.
         """
         
-        await message.reply_text(welcome_text, parse_mode='markdown')
+        await message.reply_text(welcome_text)
 
     @app.on_message(filters.command("help"))
     async def help_handler(client, message: Message):
@@ -237,25 +243,24 @@ Send me a Google Drive file link and I'll download it for you.
 **Note:** Large files may take longer to process.
         """
         
-        await message.reply_text(help_text, parse_mode='markdown')
+        await message.reply_text(help_text)
 
     @app.on_message(filters.command("status"))
     async def status_handler(client, message: Message):
         """Handle /status command"""
-        status_text = "🤖 **Bot Status**\n\n"
-        
-        # Check Google Drive connection
         gdrive_status = "✅ Connected" if drive_service else "❌ Disconnected"
-        status_text += f"**Google Drive:** {gdrive_status}\n"
-        
-        # Check download directory
         download_dir_status = "✅ Exists" if os.path.exists(config.DOWNLOAD_DIR) else "❌ Missing"
-        status_text += f"**Download Directory:** {download_dir_status}\n"
+        owner_id = config.OWNER_ID or 'Not set'
         
-        # Bot uptime (simplified)
-        status_text += f"**Owner ID:** `{config.OWNER_ID or 'Not set'}`\n"
+        status_text = f"""
+🤖 **Bot Status**
+
+**Google Drive:** {gdrive_status}
+**Download Directory:** {download_dir_status}
+**Owner ID:** `{owner_id}`
+        """
         
-        await message.reply_text(status_text, parse_mode='markdown')
+        await message.reply_text(status_text)
 
     @app.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
     async def handle_file_upload(client, message: Message):
@@ -292,16 +297,16 @@ Send me a Google Drive file link and I'll download it for you.
                 file_name = result.get('name', 'Unknown')
                 file_size = humanbytes(int(result.get('size', 0)))
                 
-                success_text = (
-                    f"✅ **File Uploaded Successfully!**\n\n"
-                    f"**File Name:** `{file_name}`\n"
-                    f"**File Size:** `{file_size}`\n"
-                    f"**Google Drive Link:** [Click Here]({file_link})"
-                )
+                success_text = f"""
+✅ **File Uploaded Successfully!**
+
+**File Name:** `{file_name}`
+**File Size:** `{file_size}`
+**Google Drive Link:** [Click Here]({file_link})
+                """
                 
                 await status_message.edit_text(
                     success_text,
-                    parse_mode='markdown',
                     disable_web_page_preview=True
                 )
             else:
@@ -331,13 +336,11 @@ Send me a Google Drive file link and I'll download it for you.
             await message.reply_text(
                 "🔗 **Google Drive Link Detected**\n\n"
                 "Download from Google Drive feature is coming soon!\n"
-                "For now, I can only upload files to Google Drive.",
-                parse_mode='markdown'
+                "For now, I can only upload files to Google Drive."
             )
         else:
             await message.reply_text(
-                "🤖 Send me a file to upload to Google Drive, or use /help for more information.",
-                parse_mode='markdown'
+                "🤖 Send me a file to upload to Google Drive, or use /help for more information."
             )
 
 # --- Application Lifecycle ---
