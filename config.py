@@ -8,13 +8,13 @@ class Config:
     # Telegram Bot Token
     BOT_TOKEN = os.environ.get('BOT_TOKEN')
     
-    # AdLinkFly Configuration - Hardcoded domain
-    DOMAIN_NAME = 'api.gplinks.com'  # Hardcoded domain
-    ADLINKFLY_TOKEN = os.environ.get('ADLINKFLY_TOKEN') 
+    # GPLinks Configuration
+    DOMAIN_NAME = 'gplinks.in'  # GPLinks API domain
+    API_KEY = os.environ.get('ADLINKFLY_TOKEN')  # GPLinks API key
     
     # Bot Messages
-    START_MESSAGE = os.environ.get('START') or 'Welcome to URL Shortener Bot!\\n\\nSend me a link to shorten it.'
-    HELP_MESSAGE = os.environ.get('HELP') or 'Help Guide:\\n\\n- Just send a link to shorten without ads\\n- Use /ads for links with ads\\n- Use /alias for custom alias without ads\\n- Use /alias_ads for custom alias with ads'
+    START_MESSAGE = os.environ.get('START') or 'Welcome to GPLinks Shortener Bot!\\n\\nSend me a link to shorten it.'
+    HELP_MESSAGE = os.environ.get('HELP') or 'Help Guide:\\n\\n- Just send a link to shorten\\n- Use /alias for custom alias\\n- Use /help for more info'
     
     # Rate Limiting
     MAX_REQUESTS_PER_MINUTE = 15
