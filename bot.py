@@ -1,468 +1,513 @@
-import os
-import asyncio
-import time
-import math
+from webserver import keep_alive
+from urllib.parse import quote
 import json
+import re
+import requests
+import telebot
+import time
+import sqlite3
+from collections import defaultdict
+from threading import Lock
 from datetime import datetime
-from typing import Optional
+from config import Config, START, HELP
 
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
-from pyrogram.enums import ParseMode
+# This script is designed to work with a adlinkfly php link shortener website!
+# For more info read the ' README.md ' file...!!
+# This script is developed by @neo_subhamoy
+# Website: https://neosubhamoy.com
 
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-from googleapiclient.errors import HttpError
+# Initialize bot
+bot = telebot.TeleBot(Config.BOT_TOKEN)
+user_data = {}
+user_data_lock = Lock()
 
-from config import config
-
-# Initialize download directory
-if not os.path.exists(config.DOWNLOAD_DIR):
-    os.makedirs(config.DOWNLOAD_DIR)
-
-# Global variables
-drive_service = None
-app = None
-gdrive_credentials = None
-
-# --- Google Drive Authentication ---
-def get_gdrive_service():
-    """Initialize Google Drive service without using token.json file"""
-    global drive_service, gdrive_credentials
+# Rate limiting setup
+class RateLimiter:
+    def __init__(self, max_requests=Config.MAX_REQUESTS_PER_MINUTE, time_window=Config.TIME_WINDOW):
+        self.user_requests = defaultdict(list)
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.lock = Lock()
     
-    creds = None
-    try:
-        # Try to load token from environment variable first
-        if config.GDRIVE_TOKEN:
-            try:
-                token_data = json.loads(config.GDRIVE_TOKEN)
-                creds = Credentials.from_authorized_user_info(token_data, config.SCOPES)
-                print("✅ Loaded Google Drive token from environment variable")
-            except json.JSONDecodeError:
-                print("❌ Invalid GDRIVE_TOKEN format in environment variable")
-        
-        # Refresh or create new credentials
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                print("🔄 Refreshing Google Drive token...")
-                creds.refresh(Request())
-                # Update environment token if we're using one
-                if config.GDRIVE_TOKEN:
-                    print("✅ Token refreshed successfully")
-            else:
-                # Create client config from environment variables
-                client_config = {
-                    "web": {
-                        "client_id": config.GDRIVE_CLIENT_ID,
-                        "client_secret": config.GDRIVE_CLIENT_SECRET,
-                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                        "token_uri": "https://oauth2.googleapis.com/token",
-                        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"]
-                    }
-                }
-                
-                flow = InstalledAppFlow.from_client_config(client_config, config.SCOPES)
-                
-                print("🔐 Google Drive Authorization Required")
-                print("Please visit the following URL to authorize the application:")
-                auth_url, _ = flow.authorization_url(prompt='consent')
-                print(f"\n🔗 {auth_url}\n")
-                
-                code = input("Enter the authorization code: ").strip()
-                flow.fetch_token(code=code)
-                creds = flow.credentials
-                
-                print("✅ Authorization successful!")
-                
-                # Show token info for user to save in environment variables
-                token_info = {
-                    "token": creds.token,
-                    "refresh_token": creds.refresh_token,
-                    "token_uri": creds.token_uri,
-                    "client_id": creds.client_id,
-                    "client_secret": creds.client_secret,
-                    "scopes": creds.scopes
-                }
-                
-                print("\n💡 **Save this token to your GDRIVE_TOKEN environment variable for future use:**")
-                print(json.dumps(token_info, indent=2))
-                print("\nThis will prevent needing to re-authenticate on next startup.")
-        
-        # Store credentials globally
-        gdrive_credentials = creds
-        
-        drive_service = build('drive', 'v3', credentials=creds)
-        
-        # Test the connection
-        about = drive_service.about().get(fields="user").execute()
-        user_email = about.get('user', {}).get('emailAddress', 'Unknown')
-        print(f"✅ Google Drive service initialized successfully")
-        print(f"📧 Connected as: {user_email}")
-        return drive_service
-        
-    except Exception as e:
-        print(f"❌ Failed to initialize Google Drive: {e}")
-        return None
-
-def save_token_to_env():
-    """Save the current token back to environment variable format"""
-    if gdrive_credentials:
-        token_info = {
-            "token": gdrive_credentials.token,
-            "refresh_token": gdrive_credentials.refresh_token,
-            "token_uri": gdrive_credentials.token_uri,
-            "client_id": gdrive_credentials.client_id,
-            "client_secret": gdrive_credentials.client_secret,
-            "scopes": gdrive_credentials.scopes
-        }
-        return json.dumps(token_info)
-    return None
-
-# --- Utility Functions ---
-def humanbytes(size: int) -> str:
-    """Convert bytes to human readable format"""
-    if not size or size == 0:
-        return "0 B"
-    
-    power = 1024
-    power_labels = ["B", "KB", "MB", "GB", "TB"]
-    power_index = 0
-    
-    while size > power and power_index < len(power_labels) - 1:
-        size /= power
-        power_index += 1
-    
-    return f"{size:.2f} {power_labels[power_index]}"
-
-async def progress_callback(current: int, total: int, message: Message, start_time: float, action: str):
-    """Update progress message"""
-    now = time.time()
-    diff = now - start_time
-    
-    # Update every 5 seconds or when completed
-    if round(diff % 5.00) == 0 or current == total:
-        try:
-            percentage = (current / total) * 100
-            speed = current / diff if diff > 0 else 0
-            elapsed_time = round(diff)
-            eta = round((total - current) / speed) if speed > 0 else 0
+    def is_allowed(self, user_id):
+        now = time.time()
+        with self.lock:
+            user_requests = self.user_requests[user_id]
             
-            # Progress bar
-            filled_blocks = math.floor(percentage / 10)
-            empty_blocks = 10 - filled_blocks
-            progress_bar = "[" + "█" * filled_blocks + "░" * empty_blocks + "]"
+            # Remove old requests
+            user_requests[:] = [req_time for req_time in user_requests 
+                              if now - req_time < self.time_window]
             
-            progress_text = (
-                f"**{action}**\n\n"
-                f"{progress_bar} **{percentage:.1f}%**\n"
-                f"**Size:** {humanbytes(total)}\n"
-                f"**Done:** {humanbytes(current)}\n"
-                f"**Speed:** {humanbytes(speed)}/s\n"
-                f"**ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}\n"
-                f"**Elapsed:** {time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}"
-            )
+            if len(user_requests) >= self.max_requests:
+                return False
             
-            await message.edit_text(progress_text)
-            
-        except FloodWait as e:
-            await asyncio.sleep(e.x)
-        except Exception as e:
-            print(f"Progress update error: {e}")
+            user_requests.append(now)
+            return True
+    
+    def get_remaining_requests(self, user_id):
+        now = time.time()
+        with self.lock:
+            user_requests = self.user_requests[user_id]
+            user_requests[:] = [req_time for req_time in user_requests 
+                              if now - req_time < self.time_window]
+            return self.max_requests - len(user_requests)
 
-# --- Google Drive Operations ---
-async def upload_to_drive(file_path: str, message: Message, start_time: float) -> Optional[dict]:
-    """Upload file to Google Drive with progress tracking"""
-    try:
-        file_name = os.path.basename(file_path)
-        file_size = os.path.getsize(file_path)
-        
-        file_metadata = {'name': file_name}
-        media = MediaFileUpload(file_path, resumable=True)
-        
-        # Create upload request
-        request = drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, name, webViewLink, mimeType, size'
+rate_limiter = RateLimiter()
+
+# Database setup for analytics (optional)
+def init_db():
+    conn = sqlite3.connect('url_shortener.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS shortened_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            original_url TEXT,
+            shortened_url TEXT,
+            alias TEXT,
+            has_ads BOOLEAN,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        
-        # Execute upload with progress
-        response = None
-        last_update = time.time()
-        
-        while response is None:
-            status, response = request.next_chunk()
-            if status:
-                current_progress = status.resumable_progress
-                current_time = time.time()
-                
-                # Update progress every 3 seconds to avoid spam
-                if current_time - last_update >= 3:
-                    await progress_callback(
-                        current_progress, 
-                        file_size, 
-                        message, 
-                        start_time, 
-                        "📤 Uploading to Google Drive"
-                    )
-                    last_update = current_time
-        
-        # Make file publicly accessible
-        drive_service.permissions().create(
-            fileId=response['id'],
-            body={'type': 'anyone', 'role': 'reader'}
-        ).execute()
-        
-        return response
-        
-    except HttpError as e:
-        await message.edit_text(f"❌ Google Drive API Error: {e}")
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def log_shortened_url(user_id, original_url, shortened_url, alias=None, has_ads=False):
+    try:
+        conn = sqlite3.connect('url_shortener.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO shortened_urls (user_id, original_url, shortened_url, alias, has_ads)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, original_url, shortened_url, alias, has_ads))
+        conn.commit()
+        conn.close()
     except Exception as e:
-        await message.edit_text(f"❌ Upload failed: {e}")
-    
-    return None
+        print(f"Database error: {e}")
 
-# --- Bot Handlers ---
-def register_handlers():
-    """Register all bot handlers"""
-    
-    @app.on_message(filters.command("start"))
-    async def start_handler(client, message: Message):
-        """Handle /start command"""
-        welcome_text = """
-🤖 **Google Drive Bot**
-
-I can help you upload files to Google Drive and download files from Google Drive links.
-
-**Commands:**
-/start - Show this message
-/help - Get detailed help
-/status - Check bot status
-
-**How to use:**
-• Send me any file to upload to Google Drive
-• Send a Google Drive link to download it here
-
-**Privacy:** Your files are only stored temporarily during transfer.
-        """
-        
-        await message.reply_text(welcome_text)
-
-    @app.on_message(filters.command("help"))
-    async def help_handler(client, message: Message):
-        """Handle /help command"""
-        help_text = """
-📖 **How to use this bot:**
-
-**Upload to Google Drive:**
-Simply send me any file (document, video, audio, photo) and I'll upload it to Google Drive.
-
-**Download from Google Drive:**
-Send me a Google Drive file link and I'll download it for you.
-
-**Supported file types:**
-• Documents (PDF, DOC, TXT, etc.)
-• Videos (MP4, AVI, MKV, etc.)
-• Audio files (MP3, WAV, etc.)
-• Images (JPG, PNG, etc.)
-• Archives (ZIP, RAR, etc.)
-
-**File size limits:**
-• Telegram limit: 2GB
-• Google Drive limit: 5TB
-
-**Note:** Large files may take longer to process.
-        """
-        
-        await message.reply_text(help_text)
-
-    @app.on_message(filters.command("status"))
-    async def status_handler(client, message: Message):
-        """Handle /status command"""
-        gdrive_status = "✅ Connected" if drive_service else "❌ Disconnected"
-        download_dir_status = "✅ Exists" if os.path.exists(config.DOWNLOAD_DIR) else "❌ Missing"
-        owner_id = config.OWNER_ID or 'Not set'
-        
-        status_text = f"""
-🤖 **Bot Status**
-
-**Google Drive:** {gdrive_status}
-**Download Directory:** {download_dir_status}
-**Owner ID:** `{owner_id}`
-        """
-        
-        await message.reply_text(status_text)
-
-    @app.on_message(filters.command("token"))
-    async def token_handler(client, message: Message):
-        """Handle /token command to show current token info"""
-        if message.from_user.id != config.OWNER_ID:
-            await message.reply_text("❌ This command is only for the bot owner.")
-            return
-            
-        if gdrive_credentials:
-            token_json = save_token_to_env()
-            await message.reply_text(
-                f"🔑 **Current Google Drive Token:**\n\n"
-                f"```json\n{token_json}\n```\n\n"
-                f"Save this to your GDRIVE_TOKEN environment variable.",
-                parse_mode='markdown'
-            )
-        else:
-            await message.reply_text("❌ No active Google Drive token found.")
-
-    @app.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
-    async def handle_file_upload(client, message: Message):
-        """Handle file uploads from Telegram to Google Drive"""
-        if not drive_service:
-            await message.reply_text("❌ Google Drive service is not available. Please contact the bot owner.")
-            return
-        
-        file_path = None
-        try:
-            start_time = time.time()
-            
-            # Initial status message
-            status_message = await message.reply_text("📥 **Downloading file...**", quote=True)
-            
-            # Download file from Telegram
-            file_path = await message.download(
-                file_name=config.DOWNLOAD_DIR,
-                progress=progress_callback,
-                progress_args=(status_message, start_time, "📥 Downloading from Telegram")
-            )
-            
-            if not file_path:
-                await status_message.edit_text("❌ Failed to download file")
-                return
-            
-            await status_message.edit_text("✅ Download complete! Starting upload to Google Drive...")
-            
-            # Upload to Google Drive
-            result = await upload_to_drive(file_path, status_message, start_time)
-            
-            if result:
-                file_link = result.get('webViewLink', 'N/A')
-                file_name = result.get('name', 'Unknown')
-                file_size = humanbytes(int(result.get('size', 0)))
-                
-                success_text = f"""
-✅ **File Uploaded Successfully!**
-
-**File Name:** `{file_name}`
-**File Size:** `{file_size}`
-**Google Drive Link:** [Click Here]({file_link})
-                """
-                
-                await status_message.edit_text(
-                    success_text,
-                    disable_web_page_preview=True
-                )
-            else:
-                await status_message.edit_text("❌ Failed to upload file to Google Drive")
-                
-        except Exception as e:
-            error_msg = f"❌ An error occurred: {str(e)}"
-            try:
-                await message.reply_text(error_msg)
-            except:
-                pass
-        finally:
-            # Clean up downloaded file
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except:
-                    pass
-
-    @app.on_message(filters.private & filters.text)
-    async def handle_text_messages(client, message: Message):
-        """Handle text messages (potential Google Drive links)"""
-        text = message.text.strip()
-        
-        # Basic Google Drive link detection
-        if 'drive.google.com' in text:
-            await message.reply_text(
-                "🔗 **Google Drive Link Detected**\n\n"
-                "Download from Google Drive feature is coming soon!\n"
-                "For now, I can only upload files to Google Drive."
-            )
-        else:
-            await message.reply_text(
-                "🤖 Send me a file to upload to Google Drive, or use /help for more information."
-            )
-
-# --- Application Lifecycle ---
-async def initialize_app():
-    """Initialize the application"""
-    global app, drive_service
+# Enhanced error handling
+def handle_api_error(response, func_name):
+    """Centralized error handling for API calls"""
+    if response.status_code != 200:
+        print(f'{func_name}: API request failed with status {response.status_code}')
+        print(f'Response: {response.text}')
+        return False
     
     try:
-        # Validate configuration
-        config.validate()
-        
-        # Initialize Google Drive service
-        print("🔄 Initializing Google Drive service...")
-        drive_service = get_gdrive_service()
-        
-        # Initialize Telegram client
-        print("🔄 Initializing Telegram client...")
-        app = Client(
-            "gdrive_bot",
-            api_id=config.API_ID,
-            api_hash=config.API_HASH,
-            bot_token=config.BOT_TOKEN
-        )
-        
+        data = response.json()
+        if data.get('status') != 'success':
+            print(f'{func_name}: API returned error: {data.get("message", "Unknown error")}')
+            return False
         return True
-        
-    except Exception as e:
-        print(f"❌ Initialization failed: {e}")
+    except json.JSONDecodeError:
+        print(f'{func_name}: Invalid JSON response')
         return False
 
-async def main():
-    """Main application entry point"""
-    if not await initialize_app():
-        print("❌ Failed to initialize application. Exiting.")
-        return
-    
-    print("✅ Bot is starting...")
-    
+# URL validation functions
+def is_valid_url(link):
+    url_regex = re.compile(
+        r'^(?:http|ftp)s?://'
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
+        r'localhost|'
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+        r'(?::\d+)?'
+        r'(?:/?|[/?]\S+)$',
+        re.IGNORECASE)
+    return url_regex.match(link)
+
+def is_valid_alias(alias):
+    alias_regex = re.compile(r'^[a-zA-Z0-9-]{3,20}$')
+    return alias_regex.match(alias)
+
+# API functions with improved error handling
+def shorten_link_with_alias(link, alias):
     try:
-        # Register handlers after app is initialized
-        register_handlers()
+        url = f'https://{Config.DOMAIN_NAME}/api?api={Config.ADLINKFLY_TOKEN}&url={link}&alias={alias}&type=0'
+        r = requests.get(url, timeout=Config.API_TIMEOUT)
+
+        if not handle_api_error(r, 'shorten_link_with_alias'):
+            return None
+            
+        response = r.json()
+        return response.get('shortenedUrl')
         
-        await app.start()
-        print("✅ Bot started successfully!")
+    except requests.exceptions.Timeout:
+        print('Request timeout in shorten_link_with_alias')
+        return None
+    except Exception as e:
+        print(f'An error occurred in shorten_link_with_alias: {str(e)}')
+        return None
+
+def shorten_link_withads_alias(link, alias):
+    try:
+        url = f'https://{Config.DOMAIN_NAME}/api?api={Config.ADLINKFLY_TOKEN}&url={link}&alias={alias}'
+        r = requests.get(url, timeout=Config.API_TIMEOUT)
+
+        if not handle_api_error(r, 'shorten_link_withads_alias'):
+            return None
+            
+        response = r.json()
+        return response.get('shortenedUrl')
         
-        # Get bot info
-        bot = await app.get_me()
-        print(f"🤖 Bot: @{bot.username} (ID: {bot.id})")
+    except requests.exceptions.Timeout:
+        print('Request timeout in shorten_link_withads_alias')
+        return None
+    except Exception as e:
+        print(f'An error occurred in shorten_link_withads_alias: {str(e)}')
+        return None
+
+def shorten_link(link):
+    try:
+        url = f'https://{Config.DOMAIN_NAME}/api?api={Config.ADLINKFLY_TOKEN}&url={link}&type=0'
+        r = requests.get(url, timeout=Config.API_TIMEOUT)
+
+        if not handle_api_error(r, 'shorten_link'):
+            return None
+            
+        response = r.json()
+        return response.get('shortenedUrl')
         
-        # Keep the bot running
-        await asyncio.Event().wait()
+    except requests.exceptions.Timeout:
+        print('Request timeout in shorten_link')
+        return None
+    except Exception as e:
+        print(f'An error occurred in shorten_link: {str(e)}')
+        return None
+
+def shorten_link_withads(link):
+    try:
+        url = f'https://{Config.DOMAIN_NAME}/api?api={Config.ADLINKFLY_TOKEN}&url={link}'
+        r = requests.get(url, timeout=Config.API_TIMEOUT)
+
+        if not handle_api_error(r, 'shorten_link_withads'):
+            return None
+            
+        response = r.json()
+        return response.get('shortenedUrl')
+        
+    except requests.exceptions.Timeout:
+        print('Request timeout in shorten_link_withads')
+        return None
+    except Exception as e:
+        print(f'An error occurred in shorten_link_withads: {str(e)}')
+        return None
+
+# Rate limit check decorator
+def check_rate_limit(func):
+    def wrapper(message, *args, **kwargs):
+        user_id = message.from_user.id
+        
+        if not rate_limiter.is_allowed(user_id):
+            remaining = rate_limiter.get_remaining_requests(user_id)
+            bot.reply_to(
+                message,
+                f"🚫 Rate limit exceeded! Please wait for {Config.TIME_WINDOW} seconds.\n"
+                f"Remaining requests after cooldown: {remaining}"
+            )
+            return
+        
+        return func(message, *args, **kwargs)
+    return wrapper
+
+# Bot command handlers
+@bot.message_handler(commands=['start'])
+@check_rate_limit
+def start(message):
+    bot.reply_to(
+        message,
+        START,
+        parse_mode='Markdown',
+        disable_web_page_preview=True
+    )
+
+@bot.message_handler(commands=['help'])
+@check_rate_limit
+def help_command(message):
+    bot.reply_to(
+        message,
+        HELP,
+        parse_mode='Markdown',
+        disable_web_page_preview=True
+    )
+
+@bot.message_handler(commands=['stats'])
+@check_rate_limit
+def stats_command(message):
+    try:
+        conn = sqlite3.connect('url_shortener.db')
+        cursor = conn.cursor()
+        
+        # Get user's total shortened URLs
+        cursor.execute(
+            'SELECT COUNT(*) FROM shortened_urls WHERE user_id = ?',
+            (message.from_user.id,)
+        )
+        user_count = cursor.fetchone()[0]
+        
+        # Get total URLs shortened by bot
+        cursor.execute('SELECT COUNT(*) FROM shortened_urls')
+        total_count = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        stats_message = (
+            f"📊 Your Shortening Stats:\n"
+            f"• Your shortened URLs: {user_count}\n"
+            f"• Total bot shortened URLs: {total_count}\n"
+            f"• Rate limit: {rate_limiter.get_remaining_requests(message.from_user.id)}/{Config.MAX_REQUESTS_PER_MINUTE} remaining"
+        )
+        
+        bot.reply_to(message, stats_message)
         
     except Exception as e:
-        print(f"❌ Bot runtime error: {e}")
-    finally:
-        print("🛑 Bot is stopping...")
-        await app.stop()
-        print("✅ Bot stopped successfully")
+        bot.reply_to(message, "❌ Could not retrieve stats at this time.")
+
+@bot.message_handler(commands=['ads'])
+@check_rate_limit
+def handle_ads_command(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text="Please send the link to shorten (with ads):"
+    )
+    bot.register_next_step_handler(message, handle_link_with_ads)
+
+def handle_link_with_ads(message):
+    if not rate_limiter.is_allowed(message.from_user.id):
+        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
+        return
+        
+    if is_valid_url(message.text):
+        bot.send_message(message.chat.id, "⏳ Shortening! Please wait...")
+        link = quote(message.text)
+        shortened_link = shorten_link_withads(link)
+        
+        if shortened_link:
+            log_shortened_url(
+                message.from_user.id,
+                message.text,
+                shortened_link,
+                has_ads=True
+            )
+            bot.reply_to(
+                message,
+                f"🔗 Link Shortened (with ads)!\n{shortened_link}",
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+        else:
+            bot.reply_to(message, '❌ Failed to shorten the link! Please try again...')
+    else:
+        bot.send_message(
+            message.chat.id,
+            "❌ Invalid URL!\nPlease reuse the command /ads to try again with a valid link..."
+        )
+
+@bot.message_handler(commands=['alias'])
+@check_rate_limit
+def handle_alias_command(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text="Please send the link to shorten with custom alias:"
+    )
+    bot.register_next_step_handler(message, handle_alias_url)
+
+def handle_alias_url(message):
+    if not rate_limiter.is_allowed(message.from_user.id):
+        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
+        return
+        
+    if is_valid_url(message.text):
+        with user_data_lock:
+            user_data[message.chat.id] = {'url': message.text}
+        bot.send_message(
+            message.chat.id,
+            "Now, please send your desired alias (3-20 characters, only letters, numbers, and hyphens allowed):"
+        )
+        bot.register_next_step_handler(message, handle_alias_creation)
+    else:
+        bot.send_message(
+            message.chat.id,
+            "❌ Invalid URL!\nPlease use /alias command again with a valid link..."
+        )
+
+def handle_alias_creation(message):
+    if not rate_limiter.is_allowed(message.from_user.id):
+        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
+        return
+        
+    if not is_valid_alias(message.text):
+        bot.send_message(
+            message.chat.id,
+            "❌ Invalid alias! Only letters, numbers, and hyphens are allowed (3-20 characters).\nPlease use /alias command again..."
+        )
+        return
+
+    chat_id = message.chat.id
+    with user_data_lock:
+        if chat_id not in user_data:
+            bot.send_message(
+                chat_id,
+                "❌ Something went wrong. Please start over with /alias command."
+            )
+            return
+
+        long_url = user_data[chat_id]['url']
+        alias = message.text
+    
+    bot.send_message(message.chat.id, "⏳ Shortening! Please wait...")
+    shortened_link = shorten_link_with_alias(quote(long_url), alias)
+    
+    if shortened_link:
+        log_shortened_url(
+            message.from_user.id,
+            long_url,
+            shortened_link,
+            alias=alias,
+            has_ads=False
+        )
+        bot.reply_to(
+            message,
+            f"🔗 Link Shortened With Custom Alias!\n{shortened_link}",
+            parse_mode='Markdown',
+            disable_web_page_preview=True
+        )
+    else:
+        bot.reply_to(
+            message,
+            '❌ Failed to create custom short link! The alias might be taken or there was an error. Please try again with a different alias.'
+        )
+    
+    # Clean up user data
+    with user_data_lock:
+        if chat_id in user_data:
+            del user_data[chat_id]
+
+@bot.message_handler(commands=['alias_ads'])
+@check_rate_limit
+def handle_alias_ads_command(message):
+    bot.send_message(
+        chat_id=message.chat.id,
+        text="Please send the link to shorten with custom alias (with ads):"
+    )
+    bot.register_next_step_handler(message, handle_alias_ads_url)
+
+def handle_alias_ads_url(message):
+    if not rate_limiter.is_allowed(message.from_user.id):
+        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
+        return
+        
+    if is_valid_url(message.text):
+        with user_data_lock:
+            user_data[message.chat.id] = {'url': message.text}
+        bot.send_message(
+            message.chat.id,
+            "Now, please send your desired alias (3-20 characters, only letters, numbers, and hyphens allowed):"
+        )
+        bot.register_next_step_handler(message, handle_alias_ads_creation)
+    else:
+        bot.send_message(
+            message.chat.id,
+            "❌ Invalid URL!\nPlease use /alias_ads command again with a valid link..."
+        )
+
+def handle_alias_ads_creation(message):
+    if not rate_limiter.is_allowed(message.from_user.id):
+        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
+        return
+        
+    if not is_valid_alias(message.text):
+        bot.send_message(
+            message.chat.id,
+            "❌ Invalid alias! Only letters, numbers, and hyphens are allowed (3-20 characters).\nPlease use /alias_ads command again..."
+        )
+        return
+
+    chat_id = message.chat.id
+    with user_data_lock:
+        if chat_id not in user_data:
+            bot.send_message(
+                chat_id,
+                "❌ Something went wrong. Please start over with /alias_ads command."
+            )
+            return
+
+        long_url = user_data[chat_id]['url']
+        alias = message.text
+    
+    bot.send_message(message.chat.id, "⏳ Shortening! Please wait...")
+    shortened_link = shorten_link_withads_alias(quote(long_url), alias)
+    
+    if shortened_link:
+        log_shortened_url(
+            message.from_user.id,
+            long_url,
+            shortened_link,
+            alias=alias,
+            has_ads=True
+        )
+        bot.reply_to(
+            message,
+            f"🔗 Link Shortened With Custom Alias (with ads)!\n{shortened_link}",
+            parse_mode='Markdown',
+            disable_web_page_preview=True
+        )
+    else:
+        bot.reply_to(
+            message,
+            '❌ Failed to create custom short link! The alias might be taken or there was an error. Please try again with a different alias.'
+        )
+    
+    # Clean up user data
+    with user_data_lock:
+        if chat_id in user_data:
+            del user_data[chat_id]
+
+@bot.message_handler(content_types=['text'])
+@check_rate_limit
+def handle_text(message):
+    if is_valid_url(message.text):
+        bot.send_message(message.chat.id, "⏳ Shortening! Please wait...")
+        link = quote(message.text)
+        shortened_link = shorten_link(link)
+        
+        if shortened_link:
+            log_shortened_url(
+                message.from_user.id,
+                message.text,
+                shortened_link,
+                has_ads=False
+            )
+            bot.reply_to(
+                message,
+                shortened_link,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+        else:
+            bot.reply_to(message, '❌ Failed to shorten the link! Please try again...')
+    else:
+        bot.send_message(
+            message.chat.id,
+            "❌ Invalid URL!\nPlease send a valid link...!\n\nUse /help for more information."
+        )
+
+# Error handler
+@bot.message_handler(func=lambda message: True)
+def handle_other_messages(message):
+    bot.reply_to(
+        message,
+        "🤖 I only understand URLs and commands. Use /help to see what I can do!"
+    )
 
 if __name__ == "__main__":
-    # Create event loop and run
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    print("🤖 URL Shortener Bot is starting...")
+    keep_alive()
     
     try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user")
+        bot.polling(none_stop=True)
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-    finally:
-        loop.close()
+        print(f"Bot crashed with error: {e}")
+        print("Restarting bot...")
+        time.sleep(5)
