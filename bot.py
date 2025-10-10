@@ -187,12 +187,15 @@ class TelegramWasabiBot:
                 config=self.boto_config
             ) as s3_client:
                 
-                # Upload file using upload_file (which handles large files better)
-                await s3_client.upload_file(
-                    file_path,
-                    config.WASABI_BUCKET,
-                    object_name
-                )
+                # Upload file using put_object for better control
+                async with aiofiles.open(file_path, 'rb') as file_data:
+                    file_content = await file_data.read()
+                    
+                    await s3_client.put_object(
+                        Bucket=config.WASABI_BUCKET,
+                        Key=object_name,
+                        Body=file_content
+                    )
                 
                 # Generate presigned URL
                 url = await s3_client.generate_presigned_url(
@@ -211,12 +214,13 @@ class TelegramWasabiBot:
             logger.error(f"Error uploading to Wasabi: {e}")
             raise
     
-    async def download_from_wasabi(self, object_name: str, local_path: str):
-        """Download file from Wasabi storage"""
+    async def upload_to_wasabi_large_file(self, file_path: str, object_name: str) -> Tuple[str, str]:
+        """Alternative method for large files using upload_fileobj"""
         session = aioboto3.Session()
         
         try:
-            logger.info(f"Downloading {object_name} from Wasabi to {local_path}")
+            file_size = os.path.getsize(file_path)
+            logger.info(f"Uploading large file {file_path} to Wasabi as {object_name}")
             
             async with session.client(
                 's3',
@@ -226,15 +230,44 @@ class TelegramWasabiBot:
                 config=self.boto_config
             ) as s3_client:
                 
-                await s3_client.download_file(
-                    config.WASABI_BUCKET,
-                    object_name,
-                    local_path
+                # Use upload_file for large files (this is sync but works with aioboto3)
+                import boto3
+                from botocore.exceptions import ClientError
+                
+                # Create a sync boto3 client for upload_file
+                sync_s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=config.WASABI_ACCESS_KEY,
+                    aws_secret_access_key=config.WASABI_SECRET_KEY,
+                    endpoint_url=config.wasabi_endpoint,
+                    region_name=config.WASABI_REGION
                 )
                 
-            logger.info(f"Download successful: {object_name}")
+                # Run upload in thread pool to avoid blocking
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None, 
+                    sync_s3_client.upload_file,
+                    file_path,
+                    config.WASABI_BUCKET,
+                    object_name
+                )
+                
+                # Generate presigned URL with async client
+                url = await s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={
+                        'Bucket': config.WASABI_BUCKET,
+                        'Key': object_name
+                    },
+                    ExpiresIn=config.DOWNLOAD_URL_EXPIRY
+                )
+                
+                logger.info(f"Large file upload successful. URL generated for {object_name}")
+                return url, self._format_size(file_size)
+                
         except Exception as e:
-            logger.error(f"Error downloading from Wasabi: {e}")
+            logger.error(f"Error uploading large file to Wasabi: {e}")
             raise
     
     async def handle_file_upload(self, message: Message, file_path: str, file_name: str):
@@ -248,8 +281,15 @@ class TelegramWasabiBot:
             # Update status
             await status_msg.edit_text("🔄 Uploading to Wasabi storage...")
             
-            # Upload to Wasabi
-            download_url, file_size = await self.upload_to_wasabi(file_path, object_name)
+            # Upload to Wasabi - choose method based on file size
+            file_size = os.path.getsize(file_path)
+            
+            if file_size > 100 * 1024 * 1024:  # 100MB
+                # Use large file method for files over 100MB
+                download_url, formatted_size = await self.upload_to_wasabi_large_file(file_path, object_name)
+            else:
+                # Use regular method for smaller files
+                download_url, formatted_size = await self.upload_to_wasabi(file_path, object_name)
             
             # Create download button
             keyboard = InlineKeyboardMarkup([
@@ -260,7 +300,7 @@ class TelegramWasabiBot:
             await status_msg.edit_text(
                 f"✅ **Upload Complete!**\n\n"
                 f"**File:** `{file_name}`\n"
-                f"**Size:** {file_size}\n"
+                f"**Size:** {formatted_size}\n"
                 f"**Storage:** Wasabi Cloud\n"
                 f"**Link Expires:** 7 days\n\n"
                 f"Click below to download:",
