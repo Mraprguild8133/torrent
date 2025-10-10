@@ -44,6 +44,19 @@ class Config:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
         
         return True
+    
+    def print_config_status(self):
+        """Print configuration status without sensitive data"""
+        print("=== Bot Configuration Status ===")
+        print(f"API_ID: {self.API_ID}")
+        print(f"API_HASH: {'*' * len(self.API_HASH) if self.API_HASH else 'MISSING'}")
+        print(f"BOT_TOKEN: {'*' * len(self.BOT_TOKEN) if self.BOT_TOKEN else 'MISSING'}")
+        print(f"WASABI_ACCESS_KEY: {'*' * len(self.WASABI_ACCESS_KEY) if self.WASABI_ACCESS_KEY else 'MISSING'}")
+        print(f"WASABI_SECRET_KEY: {'*' * len(self.WASABI_SECRET_KEY) if self.WASABI_SECRET_KEY else 'MISSING'}")
+        print(f"WASABI_BUCKET: {self.WASABI_BUCKET}")
+        print(f"WASABI_REGION: {self.WASABI_REGION}")
+        print(f"Wasabi Endpoint: {self.wasabi_endpoint}")
+        print("================================")
 
 # Global config instance
 config = Config()
