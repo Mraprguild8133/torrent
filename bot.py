@@ -3,6 +3,7 @@ import asyncio
 import logging
 import uuid
 import sys
+import time
 from typing import Optional, Tuple
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -47,6 +48,9 @@ class TelegramWasabiBot:
         
         # Create temp directory if it doesn't exist
         os.makedirs(config.TEMP_DIR, exist_ok=True)
+        
+        # Rate limiting
+        self.user_requests = {}
         
         # Register handlers
         self.register_handlers()
@@ -95,6 +99,11 @@ class TelegramWasabiBot:
             try:
                 logger.info(f"Received media from user {message.from_user.id}")
                 
+                # Check rate limit
+                if not await self.check_rate_limit(message.from_user.id):
+                    await message.reply_text("⏳ Too many requests. Please wait a minute.")
+                    return
+                
                 if not message.media:
                     await message.reply_text("Please send a file to upload.")
                     return
@@ -117,7 +126,7 @@ class TelegramWasabiBot:
                 status_msg = await message.reply_text("📥 Downloading file from Telegram...")
                 
                 download_path = await message.download(
-                    file_name=os.path.join(config.TEMP_DIR, f"temp_{file_name}"),
+                    file_name=os.path.join(config.TEMP_DIR, f"temp_{uuid.uuid4()}_{file_name}"),
                     progress=self._progress_callback,
                     progress_args=(status_msg, "Downloading from Telegram")
                 )
@@ -161,62 +170,68 @@ class TelegramWasabiBot:
                 logger.error(f"Callback error: {e}")
                 await callback_query.answer("Error processing request", show_alert=True)
     
-    async def get_s3_client(self):
-        """Get async S3 client for Wasabi"""
-        session = aioboto3.Session()
-        return session.client(
-            's3',
-            aws_access_key_id=config.WASABI_ACCESS_KEY,
-            aws_secret_access_key=config.WASABI_SECRET_KEY,
-            endpoint_url=config.wasabi_endpoint,
-            config=self.boto_config
-        )
-    
     async def upload_to_wasabi(self, file_path: str, object_name: str) -> Tuple[str, str]:
         """Upload file to Wasabi storage and return URL and file info"""
-        s3_client = await self.get_s3_client()
+        session = aioboto3.Session()
         
         try:
             # Get file size for progress tracking
             file_size = os.path.getsize(file_path)
             logger.info(f"Uploading {file_path} to Wasabi as {object_name}")
             
-            # Upload file
-            async with aiofiles.open(file_path, 'rb') as file:
-                await s3_client.upload_fileobj(
-                    file,
+            async with session.client(
+                's3',
+                aws_access_key_id=config.WASABI_ACCESS_KEY,
+                aws_secret_access_key=config.WASABI_SECRET_KEY,
+                endpoint_url=config.wasabi_endpoint,
+                config=self.boto_config
+            ) as s3_client:
+                
+                # Upload file using upload_file (which handles large files better)
+                await s3_client.upload_file(
+                    file_path,
                     config.WASABI_BUCKET,
                     object_name
                 )
-            
-            # Generate presigned URL
-            url = await s3_client.generate_presigned_url(
-                'get_object',
-                Params={
-                    'Bucket': config.WASABI_BUCKET,
-                    'Key': object_name
-                },
-                ExpiresIn=config.DOWNLOAD_URL_EXPIRY
-            )
-            
-            logger.info(f"Upload successful. URL generated for {object_name}")
-            return url, self._format_size(file_size)
-            
+                
+                # Generate presigned URL
+                url = await s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={
+                        'Bucket': config.WASABI_BUCKET,
+                        'Key': object_name
+                    },
+                    ExpiresIn=config.DOWNLOAD_URL_EXPIRY
+                )
+                
+                logger.info(f"Upload successful. URL generated for {object_name}")
+                return url, self._format_size(file_size)
+                
         except Exception as e:
             logger.error(f"Error uploading to Wasabi: {e}")
             raise
     
     async def download_from_wasabi(self, object_name: str, local_path: str):
         """Download file from Wasabi storage"""
-        s3_client = await self.get_s3_client()
+        session = aioboto3.Session()
         
         try:
             logger.info(f"Downloading {object_name} from Wasabi to {local_path}")
-            await s3_client.download_file(
-                config.WASABI_BUCKET,
-                object_name,
-                local_path
-            )
+            
+            async with session.client(
+                's3',
+                aws_access_key_id=config.WASABI_ACCESS_KEY,
+                aws_secret_access_key=config.WASABI_SECRET_KEY,
+                endpoint_url=config.wasabi_endpoint,
+                config=self.boto_config
+            ) as s3_client:
+                
+                await s3_client.download_file(
+                    config.WASABI_BUCKET,
+                    object_name,
+                    local_path
+                )
+                
             logger.info(f"Download successful: {object_name}")
         except Exception as e:
             logger.error(f"Error downloading from Wasabi: {e}")
@@ -271,8 +286,12 @@ class TelegramWasabiBot:
             if message.document:
                 return message.document.file_name, message.document.file_size
             elif message.video:
+                if message.video.file_name:
+                    return message.video.file_name, message.video.file_size
                 return f"video_{message.video.file_id}.mp4", message.video.file_size
             elif message.audio:
+                if message.audio.file_name:
+                    return message.audio.file_name, message.audio.file_size
                 return f"audio_{message.audio.file_id}.mp3", message.audio.file_size
             elif message.photo:
                 return f"photo_{message.photo.file_id}.jpg", 0
@@ -280,6 +299,10 @@ class TelegramWasabiBot:
                 return f"animation_{message.animation.file_id}.gif", message.animation.file_size
             elif message.sticker:
                 return f"sticker_{message.sticker.file_id}.webp", message.sticker.file_size
+            elif message.voice:
+                return f"voice_{message.voice.file_id}.ogg", message.voice.file_size
+            elif message.video_note:
+                return f"video_note_{message.video_note.file_id}.mp4", message.video_note.file_size
             else:
                 return None
         except Exception as e:
@@ -318,6 +341,25 @@ class TelegramWasabiBot:
         filled = int(length * percent / 100)
         bar = "█" * filled + "░" * (length - filled)
         return f"[{bar}]"
+    
+    async def check_rate_limit(self, user_id: int) -> bool:
+        """Check if user is within rate limits"""
+        now = time.time()
+        if user_id not in self.user_requests:
+            self.user_requests[user_id] = []
+        
+        # Keep only requests from last minute
+        self.user_requests[user_id] = [
+            req_time for req_time in self.user_requests[user_id] 
+            if now - req_time < 60
+        ]
+        
+        # Allow up to 5 requests per minute
+        if len(self.user_requests[user_id]) >= 5:
+            return False
+        
+        self.user_requests[user_id].append(now)
+        return True
     
     async def start(self):
         """Start the bot"""
