@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import uuid
+import sys
 from typing import Optional, Tuple
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -29,7 +30,8 @@ class TelegramWasabiBot:
             "wasabi_bot",
             api_id=config.API_ID,
             api_hash=config.API_HASH,
-            bot_token=config.BOT_TOKEN
+            bot_token=config.BOT_TOKEN,
+            in_memory=True
         )
         
         # Configure boto3 for Wasabi
@@ -186,8 +188,8 @@ class TelegramWasabiBot:
         
         return f"{size_bytes:.2f} {size_names[i]}"
     
-    async def start(self):
-        """Start the bot and register handlers"""
+    async def setup_handlers(self):
+        """Setup bot message handlers"""
         
         @self.app.on_message(filters.command("start"))
         async def start_command(client, message: Message):
@@ -316,19 +318,49 @@ class TelegramWasabiBot:
     
     async def run(self):
         """Run the bot"""
-        await self.start()
-        logger.info("Bot started successfully!")
-        await self.app.run()
+        await self.setup_handlers()
+        logger.info("Starting bot...")
+        await self.app.start()
+        
+        # Get bot info
+        me = await self.app.get_me()
+        logger.info(f"Bot started successfully as @{me.username}")
+        
+        # Keep the bot running
+        await asyncio.Event().wait()
+    
+    async def stop(self):
+        """Stop the bot"""
+        await self.app.stop()
 
-async def main():
-    """Main function"""
+def main():
+    """Main function with proper event loop handling"""
+    bot = TelegramWasabiBot()
+    
     try:
-        bot = TelegramWasabiBot()
-        await bot.run()
-    except ValueError as e:
-        logger.error(f"Configuration error: {e}")
+        # Check if we're in an async environment
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Run the bot
+        if loop.is_running():
+            # If loop is already running (e.g., in Jupyter, other async env)
+            logger.info("Event loop is already running, creating task...")
+            task = loop.create_task(bot.run())
+            return task
+        else:
+            # Standard execution
+            logger.info("Starting bot with asyncio run...")
+            asyncio.run(bot.run())
+            
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot failed to start: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
