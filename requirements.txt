@@ -1,6 +1,17 @@
-pyrogram
-tgcrypto
-python-dotenv
-boto3
-aioboto3
-aiofiles
+# Core dependencies
+pyrogram>=2.0.0
+tgcrypto>=1.2.0
+python-dotenv>=1.0.0
+
+# AWS/Wasabi S3
+boto3>=1.34.0
+aioboto3>=11.0.0
+botocore>=1.34.0
+
+# Async operations
+aiofiles>=23.0.0
+httpx>=0.24.0
+
+# Python utilities
+typing-extensions>=4.0.0
+python-dateutil>=2.8.0
