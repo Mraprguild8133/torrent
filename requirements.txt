@@ -1,8 +1,6 @@
-flask
-gunicorn
-threaded
-telebot
-pytelegrambotapi
-regex
-requests
+pyrogram
+tgcrypto
 python-dotenv
+boto3
+aioboto3
+aiofiles
