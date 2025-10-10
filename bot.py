@@ -1,513 +1,334 @@
-from webserver import keep_alive
-from urllib.parse import quote
-import json
-import re
-import requests
-import telebot
-import time
-import sqlite3
-from collections import defaultdict
-from threading import Lock
-from datetime import datetime
-from config import Config, START, HELP
+import os
+import asyncio
+import logging
+import uuid
+from typing import Optional, Tuple
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.enums import MessageMediaType
+import aiofiles
+import aioboto3
+from botocore.config import Config
 
-# This script is designed to work with a adlinkfly php link shortener website!
-# For more info read the ' README.md ' file...!!
-# This script is developed by @neo_subhamoy
-# Website: https://neosubhamoy.com
+from config import config
 
-# Initialize bot
-bot = telebot.TeleBot(Config.BOT_TOKEN)
-user_data = {}
-user_data_lock = Lock()
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Rate limiting setup
-class RateLimiter:
-    def __init__(self, max_requests=Config.MAX_REQUESTS_PER_MINUTE, time_window=Config.TIME_WINDOW):
-        self.user_requests = defaultdict(list)
-        self.max_requests = max_requests
-        self.time_window = time_window
-        self.lock = Lock()
-    
-    def is_allowed(self, user_id):
-        now = time.time()
-        with self.lock:
-            user_requests = self.user_requests[user_id]
-            
-            # Remove old requests
-            user_requests[:] = [req_time for req_time in user_requests 
-                              if now - req_time < self.time_window]
-            
-            if len(user_requests) >= self.max_requests:
-                return False
-            
-            user_requests.append(now)
-            return True
-    
-    def get_remaining_requests(self, user_id):
-        now = time.time()
-        with self.lock:
-            user_requests = self.user_requests[user_id]
-            user_requests[:] = [req_time for req_time in user_requests 
-                              if now - req_time < self.time_window]
-            return self.max_requests - len(user_requests)
-
-rate_limiter = RateLimiter()
-
-# Database setup for analytics (optional)
-def init_db():
-    conn = sqlite3.connect('url_shortener.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS shortened_urls (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            original_url TEXT,
-            shortened_url TEXT,
-            alias TEXT,
-            has_ads BOOLEAN,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def log_shortened_url(user_id, original_url, shortened_url, alias=None, has_ads=False):
-    try:
-        conn = sqlite3.connect('url_shortener.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO shortened_urls (user_id, original_url, shortened_url, alias, has_ads)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, original_url, shortened_url, alias, has_ads))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Database error: {e}")
-
-# Enhanced error handling
-def handle_api_error(response, func_name):
-    """Centralized error handling for API calls"""
-    if response.status_code != 200:
-        print(f'{func_name}: API request failed with status {response.status_code}')
-        print(f'Response: {response.text}')
-        return False
-    
-    try:
-        data = response.json()
-        if data.get('status') != 'success':
-            print(f'{func_name}: API returned error: {data.get("message", "Unknown error")}')
-            return False
-        return True
-    except json.JSONDecodeError:
-        print(f'{func_name}: Invalid JSON response')
-        return False
-
-# URL validation functions
-def is_valid_url(link):
-    url_regex = re.compile(
-        r'^(?:http|ftp)s?://'
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'
-        r'localhost|'
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
-        r'(?::\d+)?'
-        r'(?:/?|[/?]\S+)$',
-        re.IGNORECASE)
-    return url_regex.match(link)
-
-def is_valid_alias(alias):
-    alias_regex = re.compile(r'^[a-zA-Z0-9-]{3,20}$')
-    return alias_regex.match(alias)
-
-# API functions with improved error handling
-def shorten_link_with_alias(link, alias):
-    try:
-        url = f'https://{Config.DOMAIN_NAME}/api?api={Config.ADLINKFLY_TOKEN}&url={link}&alias={alias}&type=0'
-        r = requests.get(url, timeout=Config.API_TIMEOUT)
-
-        if not handle_api_error(r, 'shorten_link_with_alias'):
-            return None
-            
-        response = r.json()
-        return response.get('shortenedUrl')
+class TelegramWasabiBot:
+    def __init__(self):
+        # Validate configuration
+        config.validate()
         
-    except requests.exceptions.Timeout:
-        print('Request timeout in shorten_link_with_alias')
-        return None
-    except Exception as e:
-        print(f'An error occurred in shorten_link_with_alias: {str(e)}')
-        return None
-
-def shorten_link_withads_alias(link, alias):
-    try:
-        url = f'https://{Config.DOMAIN_NAME}/api?api={Config.ADLINKFLY_TOKEN}&url={link}&alias={alias}'
-        r = requests.get(url, timeout=Config.API_TIMEOUT)
-
-        if not handle_api_error(r, 'shorten_link_withads_alias'):
-            return None
-            
-        response = r.json()
-        return response.get('shortenedUrl')
-        
-    except requests.exceptions.Timeout:
-        print('Request timeout in shorten_link_withads_alias')
-        return None
-    except Exception as e:
-        print(f'An error occurred in shorten_link_withads_alias: {str(e)}')
-        return None
-
-def shorten_link(link):
-    try:
-        url = f'https://{Config.DOMAIN_NAME}/api?api={Config.ADLINKFLY_TOKEN}&url={link}&type=0'
-        r = requests.get(url, timeout=Config.API_TIMEOUT)
-
-        if not handle_api_error(r, 'shorten_link'):
-            return None
-            
-        response = r.json()
-        return response.get('shortenedUrl')
-        
-    except requests.exceptions.Timeout:
-        print('Request timeout in shorten_link')
-        return None
-    except Exception as e:
-        print(f'An error occurred in shorten_link: {str(e)}')
-        return None
-
-def shorten_link_withads(link):
-    try:
-        url = f'https://{Config.DOMAIN_NAME}/api?api={Config.ADLINKFLY_TOKEN}&url={link}'
-        r = requests.get(url, timeout=Config.API_TIMEOUT)
-
-        if not handle_api_error(r, 'shorten_link_withads'):
-            return None
-            
-        response = r.json()
-        return response.get('shortenedUrl')
-        
-    except requests.exceptions.Timeout:
-        print('Request timeout in shorten_link_withads')
-        return None
-    except Exception as e:
-        print(f'An error occurred in shorten_link_withads: {str(e)}')
-        return None
-
-# Rate limit check decorator
-def check_rate_limit(func):
-    def wrapper(message, *args, **kwargs):
-        user_id = message.from_user.id
-        
-        if not rate_limiter.is_allowed(user_id):
-            remaining = rate_limiter.get_remaining_requests(user_id)
-            bot.reply_to(
-                message,
-                f"🚫 Rate limit exceeded! Please wait for {Config.TIME_WINDOW} seconds.\n"
-                f"Remaining requests after cooldown: {remaining}"
-            )
-            return
-        
-        return func(message, *args, **kwargs)
-    return wrapper
-
-# Bot command handlers
-@bot.message_handler(commands=['start'])
-@check_rate_limit
-def start(message):
-    bot.reply_to(
-        message,
-        START,
-        parse_mode='Markdown',
-        disable_web_page_preview=True
-    )
-
-@bot.message_handler(commands=['help'])
-@check_rate_limit
-def help_command(message):
-    bot.reply_to(
-        message,
-        HELP,
-        parse_mode='Markdown',
-        disable_web_page_preview=True
-    )
-
-@bot.message_handler(commands=['stats'])
-@check_rate_limit
-def stats_command(message):
-    try:
-        conn = sqlite3.connect('url_shortener.db')
-        cursor = conn.cursor()
-        
-        # Get user's total shortened URLs
-        cursor.execute(
-            'SELECT COUNT(*) FROM shortened_urls WHERE user_id = ?',
-            (message.from_user.id,)
-        )
-        user_count = cursor.fetchone()[0]
-        
-        # Get total URLs shortened by bot
-        cursor.execute('SELECT COUNT(*) FROM shortened_urls')
-        total_count = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        stats_message = (
-            f"📊 Your Shortening Stats:\n"
-            f"• Your shortened URLs: {user_count}\n"
-            f"• Total bot shortened URLs: {total_count}\n"
-            f"• Rate limit: {rate_limiter.get_remaining_requests(message.from_user.id)}/{Config.MAX_REQUESTS_PER_MINUTE} remaining"
+        # Initialize Pyrogram client
+        self.app = Client(
+            "wasabi_bot",
+            api_id=config.API_ID,
+            api_hash=config.API_HASH,
+            bot_token=config.BOT_TOKEN
         )
         
-        bot.reply_to(message, stats_message)
+        # Configure boto3 for Wasabi
+        self.boto_config = Config(
+            region_name=config.WASABI_REGION,
+            signature_version='s3v4'
+        )
         
-    except Exception as e:
-        bot.reply_to(message, "❌ Could not retrieve stats at this time.")
-
-@bot.message_handler(commands=['ads'])
-@check_rate_limit
-def handle_ads_command(message):
-    bot.send_message(
-        chat_id=message.chat.id,
-        text="Please send the link to shorten (with ads):"
-    )
-    bot.register_next_step_handler(message, handle_link_with_ads)
-
-def handle_link_with_ads(message):
-    if not rate_limiter.is_allowed(message.from_user.id):
-        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
-        return
+        # Create temp directory if it doesn't exist
+        os.makedirs(config.TEMP_DIR, exist_ok=True)
+    
+    async def get_s3_client(self):
+        """Get async S3 client for Wasabi"""
+        session = aioboto3.Session()
+        return session.client(
+            's3',
+            aws_access_key_id=config.WASABI_ACCESS_KEY,
+            aws_secret_access_key=config.WASABI_SECRET_KEY,
+            endpoint_url=config.wasabi_endpoint,
+            config=self.boto_config
+        )
+    
+    async def upload_to_wasabi(self, file_path: str, object_name: str) -> Tuple[str, str]:
+        """Upload file to Wasabi storage and return URL and file info"""
+        s3_client = await self.get_s3_client()
         
-    if is_valid_url(message.text):
-        bot.send_message(message.chat.id, "⏳ Shortening! Please wait...")
-        link = quote(message.text)
-        shortened_link = shorten_link_withads(link)
-        
-        if shortened_link:
-            log_shortened_url(
-                message.from_user.id,
-                message.text,
-                shortened_link,
-                has_ads=True
+        try:
+            # Get file size for progress tracking
+            file_size = os.path.getsize(file_path)
+            
+            # Upload file
+            async with aiofiles.open(file_path, 'rb') as file:
+                await s3_client.upload_fileobj(
+                    file,
+                    config.WASABI_BUCKET,
+                    object_name
+                )
+            
+            # Generate presigned URL
+            url = await s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': config.WASABI_BUCKET,
+                    'Key': object_name
+                },
+                ExpiresIn=config.DOWNLOAD_URL_EXPIRY
             )
-            bot.reply_to(
-                message,
-                f"🔗 Link Shortened (with ads)!\n{shortened_link}",
-                parse_mode='Markdown',
-                disable_web_page_preview=True
+            
+            return url, self._format_size(file_size)
+            
+        except Exception as e:
+            logger.error(f"Error uploading to Wasabi: {e}")
+            raise
+    
+    async def download_from_wasabi(self, object_name: str, local_path: str):
+        """Download file from Wasabi storage"""
+        s3_client = await self.get_s3_client()
+        
+        try:
+            await s3_client.download_file(
+                config.WASABI_BUCKET,
+                object_name,
+                local_path
             )
+        except Exception as e:
+            logger.error(f"Error downloading from Wasabi: {e}")
+            raise
+    
+    async def handle_file_upload(self, message: Message, file_path: str, file_name: str):
+        """Handle file upload with progress updates"""
+        status_msg = await message.reply_text("📤 Starting upload to Wasabi...")
+        
+        try:
+            # Generate unique object name
+            object_name = f"telegram_files/{uuid.uuid4()}_{file_name}"
+            
+            # Update status
+            await status_msg.edit_text("🔄 Uploading to Wasabi storage...")
+            
+            # Upload to Wasabi
+            download_url, file_size = await self.upload_to_wasabi(file_path, object_name)
+            
+            # Create download button
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 Download Link", url=download_url)],
+                [InlineKeyboardButton("🔗 Copy Link", callback_data=f"copy_{object_name}")]
+            ])
+            
+            await status_msg.edit_text(
+                f"✅ **Upload Complete!**\n\n"
+                f"**File:** `{file_name}`\n"
+                f"**Size:** {file_size}\n"
+                f"**Storage:** Wasabi Cloud\n"
+                f"**Link Expires:** 7 days\n\n"
+                f"Click below to download:",
+                reply_markup=keyboard
+            )
+            
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Upload failed: {str(e)}")
+            logger.error(f"Upload error: {e}")
+        
+        finally:
+            # Clean up local file
+            if os.path.exists(file_path):
+                os.remove(file_path)
+    
+    async def handle_download_request(self, message: Message, object_name: str):
+        """Handle file download from Wasabi"""
+        status_msg = await message.reply_text("📥 Starting download from Wasabi...")
+        temp_file = os.path.join(config.TEMP_DIR, f"temp_{uuid.uuid4()}.download")
+        
+        try:
+            await status_msg.edit_text("🔄 Downloading from Wasabi storage...")
+            
+            # Download from Wasabi
+            await self.download_from_wasabi(object_name, temp_file)
+            
+            # Get file info
+            file_size = os.path.getsize(temp_file)
+            file_name = object_name.split('_', 1)[-1] if '_' in object_name else object_name
+            
+            await status_msg.edit_text(f"✅ Download complete! Sending file...")
+            
+            # Send file to user
+            async with aiofiles.open(temp_file, 'rb') as file:
+                await message.reply_document(
+                    document=file,
+                    file_name=file_name,
+                    caption=f"📁 {file_name}\n💾 {self._format_size(file_size)}"
+                )
+            
+            await status_msg.delete()
+            
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Download failed: {str(e)}")
+            logger.error(f"Download error: {e}")
+        
+        finally:
+            # Clean up
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+    
+    def _format_size(self, size_bytes: int) -> str:
+        """Format file size in human-readable format"""
+        if size_bytes == 0:
+            return "0B"
+        
+        size_names = ["B", "KB", "MB", "GB"]
+        i = 0
+        while size_bytes >= 1024 and i < len(size_names) - 1:
+            size_bytes /= 1024.0
+            i += 1
+        
+        return f"{size_bytes:.2f} {size_names[i]}"
+    
+    async def start(self):
+        """Start the bot and register handlers"""
+        
+        @self.app.on_message(filters.command("start"))
+        async def start_command(client, message: Message):
+            await message.reply_text(
+                "🤖 **Telegram Wasabi Bot**\n\n"
+                "Send me any file and I'll upload it to Wasabi storage "
+                "and provide you with a direct download link!\n\n"
+                "**Features:**\n"
+                "• 📤 Upload files up to 54GB\n"
+                "• ☁️ Wasabi cloud storage\n"
+                "• 🔗 Instant download links\n"
+                "• 📊 Progress tracking\n\n"
+                "Just send me a file to get started!"
+            )
+        
+        @self.app.on_message(filters.command("help"))
+        async def help_command(client, message: Message):
+            await message.reply_text(
+                "**How to use this bot:**\n\n"
+                "1. Send any file (document, video, audio, photo)\n"
+                "2. Bot will upload it to Wasabi cloud storage\n"
+                "3. You'll receive a direct download link\n"
+                "4. Link expires in 7 days\n\n"
+                "**Supported files:**\n"
+                "• Documents (PDF, ZIP, etc.)\n"
+                "• Videos (MP4, AVI, etc.)\n"
+                "• Audio files (MP3, WAV, etc.)\n"
+                "• Images (JPG, PNG, etc.)\n\n"
+                "**Max file size:** 54GB"
+            )
+        
+        @self.app.on_message(filters.media & filters.private)
+        async def handle_media(client, message: Message):
+            """Handle media files (documents, video, audio, etc.)"""
+            try:
+                if not message.media:
+                    await message.reply_text("Please send a file to upload.")
+                    return
+                
+                # Get file information based on media type
+                file_info = self._get_file_info(message)
+                if not file_info:
+                    await message.reply_text("Unsupported file type.")
+                    return
+                
+                file_name, file_size = file_info
+                
+                # Check file size limit
+                if file_size and file_size > config.MAX_FILE_SIZE:
+                    await message.reply_text("❌ File size exceeds 54GB limit.")
+                    return
+                
+                # Download file from Telegram
+                status_msg = await message.reply_text("📥 Downloading file from Telegram...")
+                
+                download_path = await message.download(
+                    file_name=os.path.join(config.TEMP_DIR, f"temp_{file_name}"),
+                    progress=self._progress_callback,
+                    progress_args=(status_msg, "Downloading from Telegram")
+                )
+                
+                await status_msg.edit_text("✅ File downloaded! Starting Wasabi upload...")
+                
+                # Upload to Wasabi
+                await self.handle_file_upload(message, download_path, file_name)
+                
+            except Exception as e:
+                await message.reply_text(f"❌ Error processing file: {str(e)}")
+                logger.error(f"Media handling error: {e}")
+        
+        @self.app.on_callback_query()
+        async def handle_callbacks(client, callback_query):
+            """Handle button callbacks"""
+            try:
+                data = callback_query.data
+                
+                if data.startswith("copy_"):
+                    object_name = data[5:]
+                    await callback_query.answer(
+                        "Use the download link in the message above!",
+                        show_alert=True
+                    )
+                
+                await callback_query.answer()
+                
+            except Exception as e:
+                logger.error(f"Callback error: {e}")
+                await callback_query.answer("Error processing request", show_alert=True)
+    
+    def _get_file_info(self, message: Message) -> Optional[Tuple[str, int]]:
+        """Extract file name and size from message"""
+        if message.document:
+            return message.document.file_name, message.document.file_size
+        elif message.video:
+            return f"video_{message.video.file_id}.mp4", message.video.file_size
+        elif message.audio:
+            return f"audio_{message.audio.file_id}.mp3", message.audio.file_size
+        elif message.photo:
+            return f"photo_{message.photo.file_id}.jpg", 0
+        elif message.animation:
+            return f"animation_{message.animation.file_id}.gif", message.animation.file_size
+        elif message.sticker:
+            return f"sticker_{message.sticker.file_id}.webp", message.sticker.file_size
         else:
-            bot.reply_to(message, '❌ Failed to shorten the link! Please try again...')
-    else:
-        bot.send_message(
-            message.chat.id,
-            "❌ Invalid URL!\nPlease reuse the command /ads to try again with a valid link..."
-        )
-
-@bot.message_handler(commands=['alias'])
-@check_rate_limit
-def handle_alias_command(message):
-    bot.send_message(
-        chat_id=message.chat.id,
-        text="Please send the link to shorten with custom alias:"
-    )
-    bot.register_next_step_handler(message, handle_alias_url)
-
-def handle_alias_url(message):
-    if not rate_limiter.is_allowed(message.from_user.id):
-        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
-        return
+            return None
+    
+    async def _progress_callback(self, current, total, status_msg, operation):
+        """Progress callback for upload/download operations"""
+        percent = (current / total) * 100
+        progress_bar = self._create_progress_bar(percent)
         
-    if is_valid_url(message.text):
-        with user_data_lock:
-            user_data[message.chat.id] = {'url': message.text}
-        bot.send_message(
-            message.chat.id,
-            "Now, please send your desired alias (3-20 characters, only letters, numbers, and hyphens allowed):"
-        )
-        bot.register_next_step_handler(message, handle_alias_creation)
-    else:
-        bot.send_message(
-            message.chat.id,
-            "❌ Invalid URL!\nPlease use /alias command again with a valid link..."
-        )
-
-def handle_alias_creation(message):
-    if not rate_limiter.is_allowed(message.from_user.id):
-        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
-        return
-        
-    if not is_valid_alias(message.text):
-        bot.send_message(
-            message.chat.id,
-            "❌ Invalid alias! Only letters, numbers, and hyphens are allowed (3-20 characters).\nPlease use /alias command again..."
-        )
-        return
-
-    chat_id = message.chat.id
-    with user_data_lock:
-        if chat_id not in user_data:
-            bot.send_message(
-                chat_id,
-                "❌ Something went wrong. Please start over with /alias command."
+        try:
+            await status_msg.edit_text(
+                f"{operation}...\n"
+                f"{progress_bar} {percent:.1f}%\n"
+                f"📊 {self._format_size(current)} / {self._format_size(total)}"
             )
-            return
-
-        long_url = user_data[chat_id]['url']
-        alias = message.text
+        except Exception as e:
+            logger.debug(f"Progress update failed: {e}")
     
-    bot.send_message(message.chat.id, "⏳ Shortening! Please wait...")
-    shortened_link = shorten_link_with_alias(quote(long_url), alias)
+    def _create_progress_bar(self, percent: float, length: int = 20) -> str:
+        """Create a visual progress bar"""
+        filled = int(length * percent / 100)
+        bar = "█" * filled + "░" * (length - filled)
+        return f"[{bar}]"
     
-    if shortened_link:
-        log_shortened_url(
-            message.from_user.id,
-            long_url,
-            shortened_link,
-            alias=alias,
-            has_ads=False
-        )
-        bot.reply_to(
-            message,
-            f"🔗 Link Shortened With Custom Alias!\n{shortened_link}",
-            parse_mode='Markdown',
-            disable_web_page_preview=True
-        )
-    else:
-        bot.reply_to(
-            message,
-            '❌ Failed to create custom short link! The alias might be taken or there was an error. Please try again with a different alias.'
-        )
-    
-    # Clean up user data
-    with user_data_lock:
-        if chat_id in user_data:
-            del user_data[chat_id]
+    async def run(self):
+        """Run the bot"""
+        await self.start()
+        logger.info("Bot started successfully!")
+        await self.app.run()
 
-@bot.message_handler(commands=['alias_ads'])
-@check_rate_limit
-def handle_alias_ads_command(message):
-    bot.send_message(
-        chat_id=message.chat.id,
-        text="Please send the link to shorten with custom alias (with ads):"
-    )
-    bot.register_next_step_handler(message, handle_alias_ads_url)
-
-def handle_alias_ads_url(message):
-    if not rate_limiter.is_allowed(message.from_user.id):
-        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
-        return
-        
-    if is_valid_url(message.text):
-        with user_data_lock:
-            user_data[message.chat.id] = {'url': message.text}
-        bot.send_message(
-            message.chat.id,
-            "Now, please send your desired alias (3-20 characters, only letters, numbers, and hyphens allowed):"
-        )
-        bot.register_next_step_handler(message, handle_alias_ads_creation)
-    else:
-        bot.send_message(
-            message.chat.id,
-            "❌ Invalid URL!\nPlease use /alias_ads command again with a valid link..."
-        )
-
-def handle_alias_ads_creation(message):
-    if not rate_limiter.is_allowed(message.from_user.id):
-        bot.reply_to(message, "🚫 Rate limit exceeded. Please wait a minute.")
-        return
-        
-    if not is_valid_alias(message.text):
-        bot.send_message(
-            message.chat.id,
-            "❌ Invalid alias! Only letters, numbers, and hyphens are allowed (3-20 characters).\nPlease use /alias_ads command again..."
-        )
-        return
-
-    chat_id = message.chat.id
-    with user_data_lock:
-        if chat_id not in user_data:
-            bot.send_message(
-                chat_id,
-                "❌ Something went wrong. Please start over with /alias_ads command."
-            )
-            return
-
-        long_url = user_data[chat_id]['url']
-        alias = message.text
-    
-    bot.send_message(message.chat.id, "⏳ Shortening! Please wait...")
-    shortened_link = shorten_link_withads_alias(quote(long_url), alias)
-    
-    if shortened_link:
-        log_shortened_url(
-            message.from_user.id,
-            long_url,
-            shortened_link,
-            alias=alias,
-            has_ads=True
-        )
-        bot.reply_to(
-            message,
-            f"🔗 Link Shortened With Custom Alias (with ads)!\n{shortened_link}",
-            parse_mode='Markdown',
-            disable_web_page_preview=True
-        )
-    else:
-        bot.reply_to(
-            message,
-            '❌ Failed to create custom short link! The alias might be taken or there was an error. Please try again with a different alias.'
-        )
-    
-    # Clean up user data
-    with user_data_lock:
-        if chat_id in user_data:
-            del user_data[chat_id]
-
-@bot.message_handler(content_types=['text'])
-@check_rate_limit
-def handle_text(message):
-    if is_valid_url(message.text):
-        bot.send_message(message.chat.id, "⏳ Shortening! Please wait...")
-        link = quote(message.text)
-        shortened_link = shorten_link(link)
-        
-        if shortened_link:
-            log_shortened_url(
-                message.from_user.id,
-                message.text,
-                shortened_link,
-                has_ads=False
-            )
-            bot.reply_to(
-                message,
-                shortened_link,
-                parse_mode='Markdown',
-                disable_web_page_preview=True
-            )
-        else:
-            bot.reply_to(message, '❌ Failed to shorten the link! Please try again...')
-    else:
-        bot.send_message(
-            message.chat.id,
-            "❌ Invalid URL!\nPlease send a valid link...!\n\nUse /help for more information."
-        )
-
-# Error handler
-@bot.message_handler(func=lambda message: True)
-def handle_other_messages(message):
-    bot.reply_to(
-        message,
-        "🤖 I only understand URLs and commands. Use /help to see what I can do!"
-    )
+async def main():
+    """Main function"""
+    try:
+        bot = TelegramWasabiBot()
+        await bot.run()
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+    except Exception as e:
+        logger.error(f"Bot failed to start: {e}")
 
 if __name__ == "__main__":
-    print("🤖 URL Shortener Bot is starting...")
-    keep_alive()
-    
-    try:
-        bot.polling(none_stop=True)
-    except Exception as e:
-        print(f"Bot crashed with error: {e}")
-        print("Restarting bot...")
-        time.sleep(5)
+    asyncio.run(main())
