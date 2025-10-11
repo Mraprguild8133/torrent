@@ -1,6 +1,5 @@
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 @dataclass
 class Config:
@@ -15,7 +14,7 @@ class Config:
     DOWNLOAD_PATH: str = "downloads"
     
     @classmethod
-    def from_env(cls) -> 'Config':
+    def from_env(cls):
         required_vars = [
             "API_ID", "API_HASH", "BOT_TOKEN", 
             "WASABI_ACCESS_KEY", "WASABI_SECRET_KEY", 
@@ -26,7 +25,15 @@ class Config:
         if missing:
             raise ValueError(f"Missing environment variables: {', '.join(missing)}")
             
-        return cls(**{var: os.environ[var] for var in required_vars})
+        return cls(
+            API_ID=os.environ["API_ID"],
+            API_HASH=os.environ["API_HASH"],
+            BOT_TOKEN=os.environ["BOT_TOKEN"],
+            WASABI_ACCESS_KEY=os.environ["WASABI_ACCESS_KEY"],
+            WASABI_SECRET_KEY=os.environ["WASABI_SECRET_KEY"],
+            WASABI_BUCKET=os.environ["WASABI_BUCKET"],
+            WASABI_REGION=os.environ["WASABI_REGION"]
+        )
 
 # Create global config instance
 config = Config.from_env()
