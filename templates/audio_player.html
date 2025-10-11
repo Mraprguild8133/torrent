@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Player - Wasabi Storage</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+        }
+
+        .header {
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            color: #4a5568;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #718096;
+        }
+
+        .audio-container {
+            background: #f7fafc;
+            border-radius: 10px;
+            padding: 30px;
+            margin-bottom: 20px;
+        }
+
+        audio {
+            width: 100%;
+            margin: 15px 0;
+        }
+
+        .filename {
+            background: #e2e8f0;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 15px 0;
+            word-break: break-all;
+            font-family: 'Courier New', monospace;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background: #4299e1;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #3182ce;
+            transform: translateY(-2px);
+        }
+
+        .btn-success {
+            background: #48bb78;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #38a169;
+            transform: translateY(-2px);
+        }
+
+        .bot-link {
+            margin-top: 20px;
+        }
+
+        .bot-link a {
+            color: #4299e1;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .bot-link a:hover {
+            text-decoration: underline;
+        }
+
+        .error {
+            background: #fed7d7;
+            color: #c53030;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎵 Audio Player</h1>
+            <p>Stream your audio files securely from Wasabi Storage</p>
+        </div>
+
+        <div class="audio-container">
+            <div class="filename">{{ filename }}</div>
+            <audio id="audioPlayer" controls>
+                Your browser does not support the audio element.
+            </audio>
+            
+            <div class="controls">
+                <a href="{{ audio_url }}" class="btn btn-success" download>
+                    💾 Download Audio
+                </a>
+            </div>
+        </div>
+
+        <div class="bot-link">
+            <p>Want to upload more files? Visit our <a href="{{ bot_url }}" target="_blank">Telegram Bot</a></p>
+        </div>
+    </div>
+
+    <script>
+        const audio = document.getElementById('audioPlayer');
+        const audioUrl = "{{ audio_url }}";
+
+        // Set audio source
+        audio.src = audioUrl;
+
+        audio.addEventListener('error', function(e) {
+            console.error('Audio error:', e);
+            document.querySelector('.audio-container').innerHTML = `
+                <div class="error">
+                    <h3>❌ Playback Error</h3>
+                    <p>Failed to load the audio file. This could be due to:</p>
+                    <ul style="text-align: left; margin: 10px 0;">
+                        <li>Network connectivity issues</li>
+                        <li>Audio format not supported by your browser</li>
+                        <li>URL has expired (links are valid for 7 days)</li>
+                    </ul>
+                    <p>Try downloading the file instead, or upload a new version.</p>
+                </div>
+            `;
+        });
+    </script>
+</body>
+</html>
