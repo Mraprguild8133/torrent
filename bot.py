@@ -127,7 +127,6 @@ async def upload_to_wasabi(file_path: str, file_name: str, file_size: int, statu
     
     try:
         # For upload progress, we need to use a different approach since boto3 doesn't support async callbacks
-        # We'll use a thread-based approach with a custom callback
         import threading
         import queue
         
@@ -155,7 +154,6 @@ async def upload_to_wasabi(file_path: str, file_name: str, file_size: int, statu
         
         # Monitor progress
         bytes_uploaded = 0
-        start_time = time.time()
         timeout = 300  # 5 minute timeout
         
         while True:
@@ -309,16 +307,19 @@ async def file_handler(client, message: Message):
                 f"**📁 File Name:** `{file_name}`\n"
                 f"**📊 File Size:** `{humanbytes(file_size)}`\n"
                 f"**🔗 Streaming Link Ready**\n\n"
-                f"*The link is compatible with most media players and browsers.*"
+                f"**Streaming URL:**\n`{streaming_link}`\n\n"
+                f"*Copy this link to use in your media player or browser.*"
             )
+            
+            # Create buttons with only valid HTTP URLs
+            keyboard_buttons = [
+                [InlineKeyboardButton("🌐 Open in Browser", url=streaming_link)],
+                [InlineKeyboardButton("📋 Copy Link", callback_data=f"copy_{file_name}")]
+            ]
             
             await status_message.edit_text(
                 success_message,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🎬 Streaming Link", url=streaming_link)],
-                    [InlineKeyboardButton("🌐 Open in Browser", url=streaming_link)],
-                    [InlineKeyboardButton("📱 Open in VLC", url=f"vlc://{streaming_link}")]
-                ])
+                reply_markup=InlineKeyboardMarkup(keyboard_buttons)
             )
             
         except Exception as e:
@@ -355,8 +356,10 @@ async def help_callback(_, query):
                 [InlineKeyboardButton("🔙 Back", callback_data="back_to_start")]
             ])
         )
+        await query.answer()
     except Exception as e:
         logger.error(f"Error in help callback: {e}")
+        await query.answer("Error occurred!", show_alert=True)
 
 
 @app.on_callback_query(filters.regex("^back_to_start$"))
@@ -378,8 +381,24 @@ async def back_callback(_, query):
                 [InlineKeyboardButton("📚 Help", callback_data="help")]
             ])
         )
+        await query.answer()
     except Exception as e:
         logger.error(f"Error in back callback: {e}")
+        await query.answer("Error occurred!", show_alert=True)
+
+
+@app.on_callback_query(filters.regex("^copy_"))
+async def copy_link_callback(_, query):
+    """Handle copy link callback."""
+    try:
+        file_name = query.data.replace("copy_", "")
+        streaming_link = generate_streaming_link(file_name)
+        
+        # For now, we'll just show the link since we can't programmatically copy to clipboard
+        await query.answer(f"Link ready! Use: {streaming_link}", show_alert=True)
+    except Exception as e:
+        logger.error(f"Error in copy link callback: {e}")
+        await query.answer("Error copying link!", show_alert=True)
 
 
 # --- Start the Bot ---
@@ -395,7 +414,10 @@ if __name__ == "__main__":
         logger.warning("⚠️  Wasabi storage not configured - file uploads will not work")
     
     try:
+        logger.info("✅ Bot started successfully")
         app.run()
         logger.info("✅ Bot stopped gracefully")
+    except KeyboardInterrupt:
+        logger.info("⏹️ Bot stopped by user")
     except Exception as e:
         logger.error(f"❌ Bot crashed: {e}")
