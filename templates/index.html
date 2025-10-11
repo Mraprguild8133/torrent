@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wasabi Storage Player</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            text-align: center;
+        }
+
+        .logo {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            color: #4a5568;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #718096;
+            margin-bottom: 30px;
+            font-size: 1.2rem;
+        }
+
+        .info {
+            background: #f7fafc;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: left;
+        }
+
+        .info h3 {
+            color: #2d3748;
+            margin-bottom: 10px;
+        }
+
+        .btn {
+            display: inline-block;
+            background: #4299e1;
+            color: white;
+            padding: 15px 30px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            margin: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .btn:hover {
+            background: #3182ce;
+            transform: translateY(-2px);
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            background: #c6f6d5;
+            color: #276749;
+            border-radius: 8px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🤖</div>
+        <h1>Wasabi Storage Player</h1>
+        <p class="subtitle">Stream your files securely from Wasabi Cloud Storage</p>
+        
+        <div class="info">
+            <h3>🚀 How to use:</h3>
+            <p>1. Send any file to our Telegram bot</p>
+            <p>2. Get a streaming link with player URL</p>
+            <p>3. Open the player URL in your browser</p>
+            <p>4. Stream videos and audio directly!</p>
+        </div>
+
+        <a href="{{ bot_url }}" class="btn" target="_blank">
+            📱 Open Telegram Bot
+        </a>
+
+        <div class="status">
+            ✅ Server running on port {{ port }}
+        </div>
+    </div>
+</body>
+</html>
