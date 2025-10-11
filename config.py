@@ -1,4 +1,5 @@
 import os
+import asyncio
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -23,6 +24,7 @@ class Config:
     DOWNLOAD_PATH: str = "downloads"
     WORKERS: int = 100
     MAX_CONCURRENT_TRANSMISSIONS: int = 10
+    CHUNK_SIZE: int = 64 * 1024 * 1024  # 64MB chunks for large files
     
     # Wasabi Endpoint
     @property
