@@ -179,220 +179,6 @@ def generate_streaming_link(file_name: str) -> str:
     return f"https://{config.WASABI_BUCKET}.s3.{config.WASABI_REGION}.wasabisys.com/{encoded_file_name}"
 
 
-# --- Bot Command Handlers ---
-@app.on_message(filters.command("start"))
-async def start_handler(_, message: Message):
-    """Handles the /start command."""
-    try:
-        await message.reply_text(
-            "**Welcome to the Advanced File Storage Bot!** 🚀\n\n"
-            "Send me any file, and I will upload it to secure Wasabi storage "
-            "and provide you with a high-speed, shareable streaming link.\n\n"
-            "**Features:**\n"
-            "• Handles files up to 5GB\n"
-            "• High-speed uploads and downloads\n"
-            "• Secure and reliable storage\n"
-            "• Links compatible with VLC, MX Player, and more\n\n"
-            "**Simply send a file to get started!**",
-            quote=True,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/tprojects")],
-                [InlineKeyboardButton("📚 Help", callback_data="help")]
-            ])
-        )
-    except Exception as e:
-        logger.error(f"Error in start handler: {e}")
-
-
-@app.on_message(filters.command("help"))
-async def help_handler(_, message: Message):
-    """Handles the /help command."""
-    try:
-        await message.reply_text(
-            "**How to use this bot:**\n\n"
-            "1. **Send any file** (document, video, audio)\n"
-            "2. Wait for the upload to complete\n"
-            "3. Get your **streaming link**\n\n"
-            "**Supported formats:**\n"
-            "• Videos (MP4, MKV, AVI, etc.)\n"
-            "• Audio (MP3, FLAC, WAV, etc.)\n"
-            "• Documents (PDF, ZIP, etc.)\n\n"
-            "**Maximum file size:** 5GB\n\n"
-            "Start by sending me a file! 📁",
-            quote=True
-        )
-    except Exception as e:
-        logger.error(f"Error in help handler: {e}")
-
-
-@app.on_message(filters.command("status"))
-async def status_handler(_, message: Message):
-    """Check bot and Wasabi status."""
-    try:
-        status_text = "**Bot Status:** 🟢 Online\n"
-        
-        if s3_client:
-            try:
-                # Test Wasabi connection
-                s3_client.head_bucket(Bucket=config.WASABI_BUCKET)
-                status_text += "**Wasabi Storage:** 🟢 Connected\n"
-                status_text += f"**Bucket:** `{config.WASABI_BUCKET}`\n"
-                status_text += f"**Region:** `{config.WASABI_REGION}`\n"
-            except Exception as e:
-                status_text += f"**Wasabi Storage:** 🔴 Error: {str(e)}\n"
-        else:
-            status_text += "**Wasabi Storage:** 🔴 Not Configured\n"
-        
-        await message.reply_text(status_text, quote=True)
-    except Exception as e:
-        logger.error(f"Error in status handler: {e}")
-
-
-# --- File Handling Logic ---
-@app.on_message(filters.document | filters.video | filters.audio)
-async def file_handler(client, message: Message):
-    """Handles incoming files, uploads them to Wasabi, and returns a link."""
-    try:
-        if not s3_client:
-            await message.reply_text("❌ Bot is not configured correctly. Wasabi client is unavailable.")
-            return
-
-        media = message.document or message.video or message.audio
-        if not media:
-            await message.reply_text("❌ Unsupported file type.")
-            return
-
-        file_name = media.file_name or "unnamed_file"
-        file_size = media.file_size or 0
-        
-        if file_size > config.MAX_FILE_SIZE:
-            await message.reply_text(
-                f"❌ File is too large. The maximum supported size is {humanbytes(config.MAX_FILE_SIZE)}."
-            )
-            return
-            
-        status_message = await message.reply_text(
-            f"**Starting processing...**\n"
-            f"**File:** `{file_name}`\n"
-            f"**Size:** `{humanbytes(file_size)}`",
-            quote=True
-        )
-
-        # 1. Download from Telegram
-        file_path = await download_with_progress(client, message, status_message)
-        if not file_path:
-            return
-
-        # 2. Upload to Wasabi
-        upload_success = await upload_to_wasabi(file_path, file_name, file_size, status_message)
-        if not upload_success:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            return
-
-        # 3. Generate Shareable Link
-        try:
-            streaming_link = generate_streaming_link(file_name)
-            
-            success_message = (
-                f"**✅ File Uploaded Successfully!**\n\n"
-                f"**📁 File Name:** `{file_name}`\n"
-                f"**📊 File Size:** `{humanbytes(file_size)}`\n"
-                f"**🔗 Streaming Link Ready**\n\n"
-                f"**Streaming URL:**\n`{streaming_link}`\n\n"
-                f"*Copy this link to use in your media player or browser.*"
-            )
-            
-            # Create buttons with only valid HTTP URLs
-            keyboard_buttons = [
-                [InlineKeyboardButton("🌐 Open in Browser", url=streaming_link)],
-                [InlineKeyboardButton("📋 Copy Link", callback_data=f"copy_{file_name}")]
-            ]
-            
-            await status_message.edit_text(
-                success_message,
-                reply_markup=InlineKeyboardMarkup(keyboard_buttons)
-            )
-            
-        except Exception as e:
-            await status_message.edit_text(f"❌ Could not generate shareable link: {str(e)}")
-        finally:
-            # Clean up the downloaded file
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                
-    except FloodWait as e:
-        logger.warning(f"Flood wait: {e.value} seconds")
-        await asyncio.sleep(e.value)
-    except Exception as e:
-        logger.error(f"Error in file handler: {e}")
-        try:
-            await message.reply_text("❌ An error occurred while processing your file.")
-        except:
-            pass
-
-
-@app.on_callback_query(filters.regex("^help$"))
-async def help_callback(_, query):
-    """Handle help callback."""
-    try:
-        await query.message.edit_text(
-            "**Need Help?**\n\n"
-            "Just send me any file and I'll handle the rest!\n\n"
-            "**Tips:**\n"
-            "• For best performance, use stable internet connection\n"
-            "• Large files will take longer to process\n"
-            "• Streaming links work with most media players\n\n"
-            "Try sending a file now!",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="back_to_start")]
-            ])
-        )
-        await query.answer()
-    except Exception as e:
-        logger.error(f"Error in help callback: {e}")
-        await query.answer("Error occurred!", show_alert=True)
-
-
-@app.on_callback_query(filters.regex("^back_to_start$"))
-async def back_callback(_, query):
-    """Handle back to start callback."""
-    try:
-        await query.message.edit_text(
-            "**Welcome to the Advanced File Storage Bot!** 🚀\n\n"
-            "Send me any file, and I will upload it to secure Wasabi storage "
-            "and provide you with a high-speed, shareable streaming link.\n\n"
-            "**Features:**\n"
-            "• Handles files up to 5GB\n"
-            "• High-speed uploads and downloads\n"
-            "• Secure and reliable storage\n"
-            "• Links compatible with VLC, MX Player, and more\n\n"
-            "**Simply send a file to get started!**",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/tprojects")],
-                [InlineKeyboardButton("📚 Help", callback_data="help")]
-            ])
-        )
-        await query.answer()
-    except Exception as e:
-        logger.error(f"Error in back callback: {e}")
-        await query.answer("Error occurred!", show_alert=True)
-
-
-@app.on_callback_query(filters.regex("^copy_"))
-async def copy_link_callback(_, query):
-    """Handle copy link callback."""
-    try:
-        file_name = query.data.replace("copy_", "")
-        streaming_link = generate_streaming_link(file_name)
-        
-        # For now, we'll just show the link since we can't programmatically copy to clipboard
-        await query.answer(f"Link ready! Use: {streaming_link}", show_alert=True)
-    except Exception as e:
-        logger.error(f"Error in copy link callback: {e}")
-        await query.answer("Error copying link!", show_alert=True)
-
-
 def initialize_wasabi_client():
     """Initialize Wasabi client."""
     global s3_client
@@ -407,16 +193,231 @@ def initialize_wasabi_client():
                 region_name=config.WASABI_REGION
             )
             logger.info("Wasabi client initialized successfully.")
+            return True
         else:
             logger.warning("Wasabi credentials not complete. Please check environment variables.")
+            return False
     except Exception as e:
         logger.error(f"Error initializing Wasabi client: {e}")
         s3_client = None
+        return False
+
+
+def register_handlers(client):
+    """Register all message and callback handlers."""
+    
+    @client.on_message(filters.command("start"))
+    async def start_handler(_, message: Message):
+        """Handles the /start command."""
+        try:
+            await message.reply_text(
+                "**Welcome to the Advanced File Storage Bot!** 🚀\n\n"
+                "Send me any file, and I will upload it to secure Wasabi storage "
+                "and provide you with a high-speed, shareable streaming link.\n\n"
+                "**Features:**\n"
+                "• Handles files up to 5GB\n"
+                "• High-speed uploads and downloads\n"
+                "• Secure and reliable storage\n"
+                "• Links compatible with VLC, MX Player, and more\n\n"
+                "**Simply send a file to get started!**",
+                quote=True,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/tprojects")],
+                    [InlineKeyboardButton("📚 Help", callback_data="help")]
+                ])
+            )
+        except Exception as e:
+            logger.error(f"Error in start handler: {e}")
+
+    @client.on_message(filters.command("help"))
+    async def help_handler(_, message: Message):
+        """Handles the /help command."""
+        try:
+            await message.reply_text(
+                "**How to use this bot:**\n\n"
+                "1. **Send any file** (document, video, audio)\n"
+                "2. Wait for the upload to complete\n"
+                "3. Get your **streaming link**\n\n"
+                "**Supported formats:**\n"
+                "• Videos (MP4, MKV, AVI, etc.)\n"
+                "• Audio (MP3, FLAC, WAV, etc.)\n"
+                "• Documents (PDF, ZIP, etc.)\n\n"
+                "**Maximum file size:** 5GB\n\n"
+                "Start by sending me a file! 📁",
+                quote=True
+            )
+        except Exception as e:
+            logger.error(f"Error in help handler: {e}")
+
+    @client.on_message(filters.command("status"))
+    async def status_handler(_, message: Message):
+        """Check bot and Wasabi status."""
+        try:
+            status_text = "**Bot Status:** 🟢 Online\n"
+            
+            if s3_client:
+                try:
+                    # Test Wasabi connection
+                    s3_client.head_bucket(Bucket=config.WASABI_BUCKET)
+                    status_text += "**Wasabi Storage:** 🟢 Connected\n"
+                    status_text += f"**Bucket:** `{config.WASABI_BUCKET}`\n"
+                    status_text += f"**Region:** `{config.WASABI_REGION}`\n"
+                except Exception as e:
+                    status_text += f"**Wasabi Storage:** 🔴 Error: {str(e)}\n"
+            else:
+                status_text += "**Wasabi Storage:** 🔴 Not Configured\n"
+            
+            await message.reply_text(status_text, quote=True)
+        except Exception as e:
+            logger.error(f"Error in status handler: {e}")
+
+    # --- File Handling Logic ---
+    @client.on_message(filters.document | filters.video | filters.audio)
+    async def file_handler(client, message: Message):
+        """Handles incoming files, uploads them to Wasabi, and returns a link."""
+        try:
+            if not s3_client:
+                await message.reply_text("❌ Bot is not configured correctly. Wasabi client is unavailable.")
+                return
+
+            media = message.document or message.video or message.audio
+            if not media:
+                await message.reply_text("❌ Unsupported file type.")
+                return
+
+            file_name = media.file_name or "unnamed_file"
+            file_size = media.file_size or 0
+            
+            if file_size > config.MAX_FILE_SIZE:
+                await message.reply_text(
+                    f"❌ File is too large. The maximum supported size is {humanbytes(config.MAX_FILE_SIZE)}."
+                )
+                return
+                
+            status_message = await message.reply_text(
+                f"**Starting processing...**\n"
+                f"**File:** `{file_name}`\n"
+                f"**Size:** `{humanbytes(file_size)}`",
+                quote=True
+            )
+
+            # 1. Download from Telegram
+            file_path = await download_with_progress(client, message, status_message)
+            if not file_path:
+                return
+
+            # 2. Upload to Wasabi
+            upload_success = await upload_to_wasabi(file_path, file_name, file_size, status_message)
+            if not upload_success:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                return
+
+            # 3. Generate Shareable Link
+            try:
+                streaming_link = generate_streaming_link(file_name)
+                
+                success_message = (
+                    f"**✅ File Uploaded Successfully!**\n\n"
+                    f"**📁 File Name:** `{file_name}`\n"
+                    f"**📊 File Size:** `{humanbytes(file_size)}`\n"
+                    f"**🔗 Streaming Link Ready**\n\n"
+                    f"**Streaming URL:**\n`{streaming_link}`\n\n"
+                    f"*Copy this link to use in your media player or browser.*"
+                )
+                
+                # Create buttons with only valid HTTP URLs
+                keyboard_buttons = [
+                    [InlineKeyboardButton("🌐 Open in Browser", url=streaming_link)],
+                    [InlineKeyboardButton("📋 Copy Link", callback_data=f"copy_{file_name}")]
+                ]
+                
+                await status_message.edit_text(
+                    success_message,
+                    reply_markup=InlineKeyboardMarkup(keyboard_buttons)
+                )
+                
+            except Exception as e:
+                await status_message.edit_text(f"❌ Could not generate shareable link: {str(e)}")
+            finally:
+                # Clean up the downloaded file
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    
+        except FloodWait as e:
+            logger.warning(f"Flood wait: {e.value} seconds")
+            await asyncio.sleep(e.value)
+        except Exception as e:
+            logger.error(f"Error in file handler: {e}")
+            try:
+                await message.reply_text("❌ An error occurred while processing your file.")
+            except:
+                pass
+
+    @client.on_callback_query(filters.regex("^help$"))
+    async def help_callback(_, query):
+        """Handle help callback."""
+        try:
+            await query.message.edit_text(
+                "**Need Help?**\n\n"
+                "Just send me any file and I'll handle the rest!\n\n"
+                "**Tips:**\n"
+                "• For best performance, use stable internet connection\n"
+                "• Large files will take longer to process\n"
+                "• Streaming links work with most media players\n\n"
+                "Try sending a file now!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back", callback_data="back_to_start")]
+                ])
+            )
+            await query.answer()
+        except Exception as e:
+            logger.error(f"Error in help callback: {e}")
+            await query.answer("Error occurred!", show_alert=True)
+
+    @client.on_callback_query(filters.regex("^back_to_start$"))
+    async def back_callback(_, query):
+        """Handle back to start callback."""
+        try:
+            await query.message.edit_text(
+                "**Welcome to the Advanced File Storage Bot!** 🚀\n\n"
+                "Send me any file, and I will upload it to secure Wasabi storage "
+                "and provide you with a high-speed, shareable streaming link.\n\n"
+                "**Features:**\n"
+                "• Handles files up to 5GB\n"
+                "• High-speed uploads and downloads\n"
+                "• Secure and reliable storage\n"
+                "• Links compatible with VLC, MX Player, and more\n\n"
+                "**Simply send a file to get started!**",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/tprojects")],
+                    [InlineKeyboardButton("📚 Help", callback_data="help")]
+                ])
+            )
+            await query.answer()
+        except Exception as e:
+            logger.error(f"Error in back callback: {e}")
+            await query.answer("Error occurred!", show_alert=True)
+
+    @client.on_callback_query(filters.regex("^copy_"))
+    async def copy_link_callback(_, query):
+        """Handle copy link callback."""
+        try:
+            file_name = query.data.replace("copy_", "")
+            streaming_link = generate_streaming_link(file_name)
+            
+            # For now, we'll just show the link since we can't programmatically copy to clipboard
+            await query.answer(f"Link ready! Use: {streaming_link}", show_alert=True)
+        except Exception as e:
+            logger.error(f"Error in copy link callback: {e}")
+            await query.answer("Error copying link!", show_alert=True)
+
+    logger.info("All handlers registered successfully")
 
 
 async def main():
     """Main function to run the bot."""
-    global app
+    global app, s3_client
     
     # Validate required configuration
     if not all([config.API_ID, config.API_HASH, config.BOT_TOKEN]):
@@ -424,12 +425,12 @@ async def main():
         return
     
     # Initialize Wasabi client
-    initialize_wasabi_client()
+    wasabi_initialized = initialize_wasabi_client()
     
-    if not s3_client:
+    if not wasabi_initialized:
         logger.warning("⚠️  Wasabi storage not configured - file uploads will not work")
     
-    # Initialize and run the bot
+    # Initialize the bot client
     app = Client(
         "wasabi_storage_bot",
         api_id=config.API_ID,
@@ -437,10 +438,16 @@ async def main():
         bot_token=config.BOT_TOKEN
     )
     
+    # Register all handlers
+    register_handlers(app)
+    
     try:
         logger.info("🤖 Bot is starting...")
         await app.start()
-        logger.info("✅ Bot started successfully")
+        
+        # Get bot info to confirm it's running
+        me = await app.get_me()
+        logger.info(f"✅ Bot started successfully as @{me.username}")
         
         # Keep the bot running
         await asyncio.Event().wait()
