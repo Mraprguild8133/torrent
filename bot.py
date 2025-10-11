@@ -89,16 +89,18 @@ async def handle_telegram_errors(func, *args, **kwargs):
     except Exception as e:
         raise WasabiBotError(f"Telegram error: {e}")
 
-async def handle_wasabi_errors(func, *args, **kwargs):
-    """Decorator to handle common Wasabi errors"""
+def handle_wasabi_sync(func, *args, **kwargs):
+    """Sync wrapper for Wasabi operations"""
     try:
-        return await func(*args, **kwargs)
+        return func(*args, **kwargs)
     except ClientError as e:
         error_code = e.response['Error']['Code']
         if error_code == 'NoSuchKey':
             raise WasabiBotError("File not found in Wasabi storage")
         elif error_code == 'AccessDenied':
             raise WasabiBotError("Access denied to Wasabi storage")
+        elif error_code == 'NoSuchBucket':
+            raise WasabiBotError("Bucket not found")
         else:
             raise WasabiBotError(f"Wasabi error: {error_code}")
 
@@ -157,8 +159,9 @@ async def progress_telegram(current, total, message, start_time, action):
     )
     
     time_remaining = "Calculating..."
-    if speed > 0:
-        time_remaining = time.strftime('%H:%M:%S', time.gmtime((total - current) / speed))
+    if speed > 0 and total > current:
+        time_remaining_seconds = (total - current) / speed
+        time_remaining = time.strftime('%H:%M:%S', time.gmtime(time_remaining_seconds))
     
     progress_str = (
         f"**{action}**\n"
@@ -282,11 +285,16 @@ async def list_files_command(client, message: Message):
     
     try:
         status_msg = await message.reply_text("Fetching files from Wasabi...")
-        response = await handle_wasabi_errors(
-            s3_client.list_objects_v2,
-            Bucket=config.WASABI_BUCKET,
-            Prefix=prefix,
-            MaxKeys=50
+        
+        # Run sync Wasabi operation in thread
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: handle_wasabi_sync(
+                s3_client.list_objects_v2,
+                Bucket=config.WASABI_BUCKET,
+                Prefix=prefix,
+                MaxKeys=50
+            )
         )
         
         if 'Contents' not in response:
@@ -361,12 +369,16 @@ async def handle_file(client, message: Message):
         loop = asyncio.get_event_loop()
         boto_progress = Boto3Progress(status_msg, file_size, time.time(), loop, "Uploading to Wasabi")
         
-        await handle_wasabi_errors(
-            s3_client.upload_file,
-            download_path,
-            config.WASABI_BUCKET,
-            final_filename,
-            Callback=boto_progress
+        # Run sync upload in thread
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: handle_wasabi_sync(
+                s3_client.upload_file,
+                download_path,
+                config.WASABI_BUCKET,
+                final_filename,
+                Callback=boto_progress
+            )
         )
         
         upload_url = f"https://{config.WASABI_BUCKET}.s3.{config.WASABI_REGION}.wasabisys.com/{final_filename}"
@@ -388,7 +400,7 @@ async def handle_file(client, message: Message):
         await status_msg.edit_text(f"❌ Error uploading to Wasabi: {e}")
     finally:
         # Cleanup local file
-        if os.path.exists(download_path):
+        if download_path and os.path.exists(download_path):
             os.remove(download_path)
 
 @app.on_message(filters.command("download"))
@@ -409,10 +421,13 @@ async def download_from_wasabi(client, message: Message):
     
     try:
         # Get file metadata
-        meta = await handle_wasabi_errors(
-            s3_client.head_object,
-            Bucket=config.WASABI_BUCKET,
-            Key=file_key
+        meta = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: handle_wasabi_sync(
+                s3_client.head_object,
+                Bucket=config.WASABI_BUCKET,
+                Key=file_key
+            )
         )
         file_size = meta.get('ContentLength', 0)
         
@@ -420,12 +435,15 @@ async def download_from_wasabi(client, message: Message):
         loop = asyncio.get_event_loop()
         boto_progress = Boto3Progress(status_msg, file_size, time.time(), loop, "Downloading from Wasabi")
         
-        await handle_wasabi_errors(
-            s3_client.download_file,
-            config.WASABI_BUCKET,
-            file_key,
-            local_path,
-            Callback=boto_progress
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: handle_wasabi_sync(
+                s3_client.download_file,
+                config.WASABI_BUCKET,
+                file_key,
+                local_path,
+                Callback=boto_progress
+            )
         )
         
         await status_msg.edit_text("Download complete. Uploading to Telegram...")
@@ -458,7 +476,23 @@ async def download_from_wasabi(client, message: Message):
 @app.on_callback_query(filters.regex(r"^download_"))
 async def handle_download_callback(client, callback_query):
     file_key = callback_query.data.replace("download_", "")
-    await download_from_wasabi(client, callback_query.message)
+    
+    # Create a mock message object for the download function
+    class MockMessage:
+        def __init__(self, chat_id, message_id, from_user, command):
+            self.chat = type('Chat', (), {'id': chat_id})()
+            self.message_id = message_id
+            self.from_user = from_user
+            self.command = command
+    
+    mock_message = MockMessage(
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.id,
+        from_user=callback_query.from_user,
+        command=["download", file_key]
+    )
+    
+    await download_from_wasabi(client, mock_message)
     await callback_query.answer()
 
 # --- Main Execution ---
@@ -470,12 +504,25 @@ async def main():
     # Test Wasabi connection
     if s3_client:
         try:
-            await handle_wasabi_errors(s3_client.head_bucket, Bucket=config.WASABI_BUCKET)
+            await asyncio.get_event_loop().run_in_executor(
+                None, 
+                lambda: handle_wasabi_sync(s3_client.head_bucket, Bucket=config.WASABI_BUCKET)
+            )
             print("Wasabi bucket is accessible.")
         except WasabiBotError as e:
             print(f"Warning: Wasabi bucket access issue: {e}")
     
+    print("Bot is now running. Press Ctrl+C to stop.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Create necessary directories
+    os.makedirs(config.DOWNLOAD_PATH, exist_ok=True)
+    
+    try:
+        # Run the bot
+        app.run(main())
+    except KeyboardInterrupt:
+        print("Bot stopped by user")
+    except Exception as e:
+        print(f"Bot crashed with error: {e}")
