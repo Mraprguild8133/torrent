@@ -1,96 +1,107 @@
-from flask import Flask, render_template, request, redirect, url_for
+import os
 import base64
 import logging
-import threading
+from urllib.parse import unquote
+from flask import Flask, request, render_template, redirect, url_for, send_file, Response
 from config import config
 
-# Setup logging
-logging.basicConfig(level=config.LOG_LEVEL)
+# Configure logging
+logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Supported formats for web player
+SUPPORTED_VIDEO_FORMATS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.mpeg', '.mpg', '.ts'}
+SUPPORTED_AUDIO_FORMATS = {'.mp3', '.m4a', '.flac', '.wav', '.aac', '.ogg', '.wma'}
+
+def get_file_extension(filename: str) -> str:
+    """Extract file extension in lowercase."""
+    return os.path.splitext(filename)[1].lower()
+
+def is_video_file(filename: str) -> bool:
+    """Check if file is a supported video format."""
+    return get_file_extension(filename) in SUPPORTED_VIDEO_FORMATS
+
+def is_audio_file(filename: str) -> bool:
+    """Check if file is a supported audio format."""
+    return get_file_extension(filename) in SUPPORTED_AUDIO_FORMATS
+
+def decode_url(encoded_url: str) -> str:
+    """Decode base64 encoded URL."""
+    try:
+        # Add padding if needed
+        padding = 4 - (len(encoded_url) % 4)
+        if padding != 4:
+            encoded_url += '=' * padding
+        
+        decoded_bytes = base64.urlsafe_b64decode(encoded_url)
+        return decoded_bytes.decode('utf-8')
+    except Exception as e:
+        logger.error(f"Error decoding URL: {e}")
+        return None
+
 @app.route('/')
 def index():
-    """Main page with information about the bot"""
-    return render_template('index.html', 
-                         bot_url=f"https://t.me/{(config.BOT_TOKEN.split(':')[0])}",
-                         port=config.WEB_PORT)
+    """Main page with information about the web player."""
+    return render_template('index.html', render_url=config.RENDER_URL)
 
 @app.route('/player/video/<encoded_url>')
 def video_player(encoded_url):
-    """Video player page for streaming videos"""
+    """Video player page."""
     try:
-        # Decode the base64 URL
-        padding = 4 - (len(encoded_url) % 4)
-        if padding != 4:
-            encoded_url += '=' * padding
+        presigned_url = decode_url(encoded_url)
+        if not presigned_url:
+            return "Invalid URL", 400
         
-        video_url = base64.urlsafe_b64decode(encoded_url).decode()
+        # Extract filename from URL for display
+        filename = "Video File"
+        if '/' in presigned_url:
+            filename = unquote(presigned_url.split('/')[-1].split('?')[0])
         
-        # Get filename from URL for display
-        filename = video_url.split('/')[-1].split('?')[0]
-        
-        return render_template('player.html', 
-                             video_url=video_url,
+        return render_template('video_player.html', 
+                             video_url=presigned_url, 
                              filename=filename,
-                             bot_url=f"https://t.me/{(config.BOT_TOKEN.split(':')[0])}")
-    
+                             render_url=config.RENDER_URL)
     except Exception as e:
-        logger.error(f"Error decoding video URL: {e}")
-        return render_template('error.html', 
-                             error="Invalid video URL",
-                             bot_url=f"https://t.me/{(config.BOT_TOKEN.split(':')[0])}")
+        logger.error(f"Video player error: {e}")
+        return "Error loading video player", 500
 
 @app.route('/player/audio/<encoded_url>')
 def audio_player(encoded_url):
-    """Audio player page for streaming audio"""
+    """Audio player page."""
     try:
-        # Decode the base64 URL
-        padding = 4 - (len(encoded_url) % 4)
-        if padding != 4:
-            encoded_url += '=' * padding
+        presigned_url = decode_url(encoded_url)
+        if not presigned_url:
+            return "Invalid URL", 400
         
-        audio_url = base64.urlsafe_b64decode(encoded_url).decode()
-        filename = audio_url.split('/')[-1].split('?')[0]
+        # Extract filename from URL for display
+        filename = "Audio File"
+        if '/' in presigned_url:
+            filename = unquote(presigned_url.split('/')[-1].split('?')[0])
         
         return render_template('audio_player.html', 
-                             audio_url=audio_url,
+                             audio_url=presigned_url, 
                              filename=filename,
-                             bot_url=f"https://t.me/{(config.BOT_TOKEN.split(':')[0])}")
-    
+                             render_url=config.RENDER_URL)
     except Exception as e:
-        logger.error(f"Error decoding audio URL: {e}")
-        return render_template('error.html', 
-                             error="Invalid audio URL",
-                             bot_url=f"https://t.me/{(config.BOT_TOKEN.split(':')[0])}")
+        logger.error(f"Audio player error: {e}")
+        return "Error loading audio player", 500
 
 @app.route('/health')
 def health_check():
-    """Health check endpoint for monitoring"""
-    return {'status': 'healthy', 'service': 'wasabi-storage-player'}
+    """Health check endpoint."""
+    return {'status': 'healthy', 'service': 'wasabi-web-player'}
 
+# Error handlers
 @app.errorhandler(404)
 def not_found(error):
-    return render_template('error.html', 
-                         error="Page not found",
-                         bot_url=f"https://t.me/{(config.BOT_TOKEN.split(':')[0])}"), 404
+    return render_template('error.html', error_code=404, error_message="Page not found"), 404
 
 @app.errorhandler(500)
 def internal_error(error):
-    return render_template('error.html', 
-                         error="Internal server error",
-                         bot_url=f"https://t.me/{(config.BOT_TOKEN.split(':')[0])}"), 500
-
-def run_web_server():
-    """Run the Flask web server"""
-    logger.info(f"🚀 Starting web server on {config.WEB_HOST}:{config.WEB_PORT}")
-    app.run(
-        host=config.WEB_HOST,
-        port=config.WEB_PORT,
-        debug=False,
-        threaded=True
-    )
+    return render_template('error.html', error_code=500, error_message="Internal server error"), 500
 
 if __name__ == '__main__':
-    run_web_server()
+    logger.info(f"🚀 Starting Wasabi Web Player on port {config.WEB_PORT}")
+    app.run(host='0.0.0.0', port=config.WEB_PORT, debug=config.LOG_LEVEL == 'DEBUG')
