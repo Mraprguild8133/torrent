@@ -25,8 +25,7 @@ required_vars = {
     "WASABI_ACCESS_KEY": WASABI_ACCESS_KEY,
     "WASABI_SECRET_KEY": WASABI_SECRET_KEY,
     "WASABI_BUCKET": WASABI_BUCKET,
-    "WASABI_REGION": WASABI_REGION,
-    "BASE_URL": RENDER_EXTERNAL_URL
+    "WASABI_REGION": WASABI_REGION
 }
 
 missing_vars = [var for var, value in required_vars.items() if not value]
