@@ -13,7 +13,7 @@ import multiprocessing
 import json
 
 import boto3
-from botocere.exceptions import ClientError
+from botocore.exceptions import ClientError
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from flask import Flask, render_template, request, jsonify, send_file
