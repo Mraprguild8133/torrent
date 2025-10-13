@@ -326,12 +326,21 @@ async def cleanup_task():
         if initial_count != len(file_store):
             print(f"🧹 Cleaned up {initial_count - len(file_store)} old file store entries")
 
+@app.on_startup()
+async def startup_handler(client):
+    """Startup handler to initialize background tasks"""
+    print("🚀 Bot started successfully!")
+    # Start cleanup task only when the bot is running
+    asyncio.create_task(cleanup_task())
+
+@app.on_shutdown()
+async def shutdown_handler(client):
+    """Shutdown handler"""
+    print("👋 Bot is shutting down...")
+
 # --- Main Execution ---
 if __name__ == "__main__":
     print("🤖 Bot is starting...")
-    
-    # Start cleanup task
-    asyncio.create_task(cleanup_task())
     
     try:
         app.run()
