@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import hashlib
 import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 from pyrogram import Client, filters
@@ -39,6 +40,9 @@ except ClientError as e:
     print(f"❌ Failed to connect to Wasabi: {e}")
     exit(1)
 
+# Store file information temporarily (in production, use a database)
+file_store = {}
+
 # --- Helper Functions ---
 def humanbytes(size):
     """Converts bytes to a human-readable format."""
@@ -50,6 +54,10 @@ def humanbytes(size):
     for i in range(len(power_dict)):
         if size < power ** (i + 1) or i == len(power_dict) - 1:
             return f"{size / (power ** i):.2f} {power_dict[i]}"
+
+def generate_file_id(file_name):
+    """Generate a short unique ID for the file to use in callback data"""
+    return hashlib.md5(f"{file_name}_{time.time()}".encode()).hexdigest()[:16]
 
 class ProgressTracker:
     """Track progress for individual uploads/downloads"""
@@ -115,7 +123,8 @@ async def start_handler(client, message: Message):
         "1. 📥 Download it from Telegram\n"
         "2. ☁️ Upload it to Wasabi cloud storage\n"
         "3. 🔗 Provide you with a direct, streamable link\n\n"
-        "**Note:** This bot is for authorized users only."
+        "**Note:** This bot is for authorized users only.\n"
+        "Use /status to check bot connectivity."
     )
 
 @app.on_message(filters.command("status") & filters.private)
@@ -134,6 +143,21 @@ async def status_handler(client, message: Message):
     
     await message.reply_text(status_msg)
 
+@app.on_message(filters.command("cleanup") & filters.private)
+async def cleanup_handler(client, message: Message):
+    """Cleanup stored file data"""
+    if message.from_user.id != ADMIN_ID:
+        await message.reply_text("❌ Unauthorized")
+        return
+    
+    global file_store
+    count = len(file_store)
+    # Remove old entries (older than 1 hour)
+    current_time = time.time()
+    file_store = {k: v for k, v in file_store.items() if current_time - v['timestamp'] < 3600}
+    
+    await message.reply_text(f"🧹 Cleaned up {count - len(file_store)} old entries. {len(file_store)} entries remain.")
+
 @app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
 async def file_handler(client, message: Message):
     """Main handler for processing incoming files."""
@@ -144,20 +168,20 @@ async def file_handler(client, message: Message):
     # Get file information
     if message.document:
         media = message.document
+        file_name = media.file_name
     elif message.video:
         media = message.video
+        file_name = media.file_name or f"video_{message.id}.mp4"
     elif message.audio:
         media = message.audio
+        file_name = media.file_name or f"audio_{message.id}.mp3"
     elif message.photo:
         media = message.photo
-        # For photos, we'll use a default name since they don't have file names
         file_name = f"photo_{message.id}.jpg"
     else:
         await message.reply_text("❌ Unsupported file type.")
         return
 
-    if not message.photo:
-        file_name = media.file_name
     file_size = media.file_size
     
     # Inform user that the process has started
@@ -210,10 +234,18 @@ async def file_handler(client, message: Message):
             ExpiresIn=604800  # Link expires in 7 days
         )
         
-        # 4. Send success message with links
+        # 4. Generate a unique file ID for callback data
+        file_id = generate_file_id(file_name)
+        file_store[file_id] = {
+            'file_name': file_name,
+            'presigned_url': presigned_url,
+            'timestamp': time.time()
+        }
+        
+        # 5. Send success message with links
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔗 Direct Download", url=presigned_url)],
-            [InlineKeyboardButton("📋 Copy URL", callback_data=f"copy_{file_name}")]
+            [InlineKeyboardButton("📋 Copy URL", callback_data=f"url_{file_id}")]
         ])
         
         final_message = (
@@ -235,35 +267,38 @@ async def file_handler(client, message: Message):
             await message.reply_text(error_msg)
         
     finally:
-        # 5. Clean up the downloaded file
+        # 6. Clean up the downloaded file
         if downloaded_file_path and os.path.exists(downloaded_file_path):
             try:
                 os.remove(downloaded_file_path)
             except Exception as e:
                 print(f"Warning: Could not delete temporary file: {e}")
 
-@app.on_callback_query(filters.regex("^copy_"))
+@app.on_callback_query(filters.regex("^url_"))
 async def copy_url_callback(client, callback_query):
     """Handle copy URL callback"""
-    file_name = callback_query.data.replace("copy_", "")
+    file_id = callback_query.data.replace("url_", "")
     
-    try:
-        # Regenerate presigned URL
-        presigned_url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': WASABI_BUCKET, 'Key': file_name},
-            ExpiresIn=604800
-        )
-        
-        await callback_query.answer("URL copied to clipboard!", show_alert=True)
-        # Note: We can't actually copy to clipboard in Telegram, but we can show the URL
-        await callback_query.message.reply_text(
-            f"**🔗 Direct URL:**\n`{presigned_url}`\n\n"
-            f"Copy this URL manually. It expires in 7 days."
-        )
-        
-    except Exception as e:
-        await callback_query.answer(f"Error generating URL: {e}", show_alert=True)
+    if file_id not in file_store:
+        await callback_query.answer("❌ URL expired or not found. Please re-upload the file.", show_alert=True)
+        return
+    
+    file_info = file_store[file_id]
+    presigned_url = file_info['presigned_url']
+    file_name = file_info['file_name']
+    
+    await callback_query.answer("URL copied to chat!", show_alert=False)
+    
+    # Send the URL as a separate message
+    await callback_query.message.reply_text(
+        f"**🔗 Direct URL for `{file_name}`:**\n\n"
+        f"`{presigned_url}`\n\n"
+        f"**Expires in:** 7 days\n"
+        f"**Use this URL for:**\n"
+        f"• Direct downloads\n"
+        f"• Streaming (if supported by file type)\n"
+        f"• Sharing with others"
+    )
 
 # Error handler
 @app.on_message(filters.private)
@@ -275,12 +310,29 @@ async def invalid_handler(client, message: Message):
     if not (message.document or message.video or message.audio or message.photo):
         await message.reply_text(
             "❌ Please send a file (document, video, audio, or photo) to upload to Wasabi.\n\n"
-            "Use /start to see bot instructions."
+            "Use /start to see bot instructions.\n"
+            "Use /status to check bot connectivity."
         )
+
+# Cleanup old file store entries periodically
+async def cleanup_task():
+    """Periodically clean up old file store entries"""
+    while True:
+        await asyncio.sleep(3600)  # Run every hour
+        current_time = time.time()
+        global file_store
+        initial_count = len(file_store)
+        file_store = {k: v for k, v in file_store.items() if current_time - v['timestamp'] < 7200}  # Keep for 2 hours
+        if initial_count != len(file_store):
+            print(f"🧹 Cleaned up {initial_count - len(file_store)} old file store entries")
 
 # --- Main Execution ---
 if __name__ == "__main__":
     print("🤖 Bot is starting...")
+    
+    # Start cleanup task
+    asyncio.create_task(cleanup_task())
+    
     try:
         app.run()
     except KeyboardInterrupt:
