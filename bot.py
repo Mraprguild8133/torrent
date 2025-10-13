@@ -13,33 +13,6 @@ from config import (
     WASABI_BUCKET, WASABI_REGION, WASABI_ENDPOINT_URL
 )
 
-# Initialize Pyrogram Client
-app = Client(
-    "wasabi_uploader_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
-
-# Initialize Boto3 S3 Client for Wasabi
-try:
-    s3_client = boto3.client(
-        's3',
-        endpoint_url=WASABI_ENDPOINT_URL,
-        aws_access_key_id=WASABI_ACCESS_KEY,
-        aws_secret_access_key=WASABI_SECRET_KEY,
-        region_name=WASABI_REGION
-    )
-    # Test connection by listing buckets
-    s3_client.list_buckets()
-    print("✅ Successfully connected to Wasabi")
-except NoCredentialsError:
-    print("❌ Wasabi credentials not found")
-    exit(1)
-except ClientError as e:
-    print(f"❌ Failed to connect to Wasabi: {e}")
-    exit(1)
-
 # Store file information temporarily (in production, use a database)
 file_store = {}
 
@@ -58,6 +31,15 @@ def humanbytes(size):
 def generate_file_id(file_name):
     """Generate a short unique ID for the file to use in callback data"""
     return hashlib.md5(f"{file_name}_{time.time()}".encode()).hexdigest()[:16]
+
+def cleanup_old_entries():
+    """Clean up old file store entries"""
+    current_time = time.time()
+    global file_store
+    initial_count = len(file_store)
+    file_store = {k: v for k, v in file_store.items() if current_time - v['timestamp'] < 7200}  # Keep for 2 hours
+    if initial_count != len(file_store):
+        print(f"🧹 Cleaned up {initial_count - len(file_store)} old file store entries")
 
 class ProgressTracker:
     """Track progress for individual uploads/downloads"""
@@ -109,6 +91,33 @@ class ProgressTracker:
 # Create progress tracker instance
 progress_tracker = ProgressTracker()
 
+# Initialize Boto3 S3 Client for Wasabi
+try:
+    s3_client = boto3.client(
+        's3',
+        endpoint_url=WASABI_ENDPOINT_URL,
+        aws_access_key_id=WASABI_ACCESS_KEY,
+        aws_secret_access_key=WASABI_SECRET_KEY,
+        region_name=WASABI_REGION
+    )
+    # Test connection by listing buckets
+    s3_client.list_buckets()
+    print("✅ Successfully connected to Wasabi")
+except NoCredentialsError:
+    print("❌ Wasabi credentials not found")
+    exit(1)
+except ClientError as e:
+    print(f"❌ Failed to connect to Wasabi: {e}")
+    exit(1)
+
+# Initialize Pyrogram Client
+app = Client(
+    "wasabi_uploader_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
+
 # --- Bot Command Handlers ---
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message: Message):
@@ -150,13 +159,27 @@ async def cleanup_handler(client, message: Message):
         await message.reply_text("❌ Unauthorized")
         return
     
-    global file_store
-    count = len(file_store)
-    # Remove old entries (older than 1 hour)
-    current_time = time.time()
-    file_store = {k: v for k, v in file_store.items() if current_time - v['timestamp'] < 3600}
+    cleanup_old_entries()
+    await message.reply_text(f"🧹 Cleanup completed. {len(file_store)} entries remain.")
+
+@app.on_message(filters.command("stats") & filters.private)
+async def stats_handler(client, message: Message):
+    """Show bot statistics"""
+    if message.from_user.id != ADMIN_ID:
+        await message.reply_text("❌ Unauthorized")
+        return
     
-    await message.reply_text(f"🧹 Cleaned up {count - len(file_store)} old entries. {len(file_store)} entries remain.")
+    cleanup_old_entries()
+    total_size = sum(os.path.getsize(f) for f in file_store.values() if os.path.exists(f)) if file_store else 0
+    
+    stats_msg = (
+        f"**📊 Bot Statistics**\n\n"
+        f"**Stored Files:** {len(file_store)}\n"
+        f"**Total Size:** {humanbytes(total_size)}\n"
+        f"**Active Links:** {len([v for v in file_store.values() if time.time() - v['timestamp'] < 604800])}"
+    )
+    
+    await message.reply_text(stats_msg)
 
 @app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
 async def file_handler(client, message: Message):
@@ -164,6 +187,9 @@ async def file_handler(client, message: Message):
     if message.from_user.id != ADMIN_ID:
         await message.reply_text("❌ You are not authorized to send files.")
         return
+
+    # Clean up old entries before processing new file
+    cleanup_old_entries()
 
     # Get file information
     if message.document:
@@ -279,6 +305,9 @@ async def copy_url_callback(client, callback_query):
     """Handle copy URL callback"""
     file_id = callback_query.data.replace("url_", "")
     
+    # Clean up old entries first
+    cleanup_old_entries()
+    
     if file_id not in file_store:
         await callback_query.answer("❌ URL expired or not found. Please re-upload the file.", show_alert=True)
         return
@@ -314,35 +343,15 @@ async def invalid_handler(client, message: Message):
             "Use /status to check bot connectivity."
         )
 
-# Cleanup old file store entries periodically
-async def cleanup_task():
-    """Periodically clean up old file store entries"""
-    while True:
-        await asyncio.sleep(3600)  # Run every hour
-        current_time = time.time()
-        global file_store
-        initial_count = len(file_store)
-        file_store = {k: v for k, v in file_store.items() if current_time - v['timestamp'] < 7200}  # Keep for 2 hours
-        if initial_count != len(file_store):
-            print(f"🧹 Cleaned up {initial_count - len(file_store)} old file store entries")
-
-@app.on_startup()
-async def startup_handler(client):
-    """Startup handler to initialize background tasks"""
-    print("🚀 Bot started successfully!")
-    # Start cleanup task only when the bot is running
-    asyncio.create_task(cleanup_task())
-
-@app.on_shutdown()
-async def shutdown_handler(client):
-    """Shutdown handler"""
-    print("👋 Bot is shutting down...")
-
 # --- Main Execution ---
 if __name__ == "__main__":
     print("🤖 Bot is starting...")
     
     try:
+        # Clean up any old entries on startup
+        cleanup_old_entries()
+        
+        # Start the bot
         app.run()
     except KeyboardInterrupt:
         print("\n🛑 Bot stopped by user")
