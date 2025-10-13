@@ -1,866 +1,518 @@
 import os
 import time
+import boto3
 import asyncio
 import re
 import base64
-import json
-import hashlib
-from threading import Thread, Lock
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-import logging
-from logging.handlers import RotatingFileHandler
-import secrets
-
-import boto3
-import botocore
-from flask import Flask, render_template, request, jsonify, send_file
-from pyrogram import Client, filters, enums
+from threading import Thread
+from flask import Flask, render_template
+from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.errors import FloodWait
 from dotenv import load_dotenv
-import aiofiles
-from cryptography.fernet import Fernet
-import redis
-import psutil
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-import requests
+import logging
+from collections import defaultdict
+from datetime import datetime, timedelta
+import botocore
 
-# Import configuration
-from config import config
-
-# =============================================================================
-# LOGGING SETUP
-# =============================================================================
-
-def setup_logging():
-    """Configure advanced logging with rotation"""
-    log_level = getattr(logging, config.monitoring.LOG_LEVEL)
-    
-    log_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
-    )
-    
-    # Root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    
-    if config.monitoring.ENABLE_LOGGING:
-        # File handler with rotation
-        file_handler = RotatingFileHandler(
-            'bot.log', maxBytes=10*1024*1024, backupCount=5
-        )
-        file_handler.setFormatter(log_formatter)
-        root_logger.addHandler(file_handler)
-    
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(log_formatter)
-    root_logger.addHandler(console_handler)
-
-setup_logging()
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# METRICS & MONITORING
-# =============================================================================
+# Load environment variables
+load_dotenv()
 
-if config.monitoring.ENABLE_METRICS:
-    # Prometheus metrics
-    REQUEST_COUNT = Counter('bot_requests_total', 'Total requests', ['endpoint', 'method', 'status'])
-    UPLOAD_SIZE = Histogram('upload_size_bytes', 'File upload sizes')
-    DOWNLOAD_SIZE = Histogram('download_size_bytes', 'File download sizes')
-    PROCESSING_TIME = Histogram('processing_time_seconds', 'Request processing time')
-    ACTIVE_UPLOADS = Counter('active_uploads', 'Active uploads')
-    ACTIVE_DOWNLOADS = Counter('active_downloads', 'Active downloads')
+# Configuration
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WASABI_ACCESS_KEY = os.getenv("WASABI_ACCESS_KEY")
+WASABI_SECRET_KEY = os.getenv("WASABI_SECRET_KEY")
+WASABI_BUCKET = os.getenv("WASABI_BUCKET")
+WASABI_REGION = os.getenv("WASABI_REGION", "us-east-1")
+RENDER_URL = os.getenv("RENDER_URL", "http://localhost:8000")
+MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2GB
 
-# =============================================================================
-# CACHE & STORAGE MANAGER
-# =============================================================================
+# Validate environment variables
+missing_vars = []
+for var_name, var_value in [
+    ("API_ID", API_ID),
+    ("API_HASH", API_HASH),
+    ("BOT_TOKEN", BOT_TOKEN),
+    ("WASABI_ACCESS_KEY", WASABI_ACCESS_KEY),
+    ("WASABI_SECRET_KEY", WASABI_SECRET_KEY),
+    ("WASABI_BUCKET", WASABI_BUCKET)
+]:
+    if not var_value:
+        missing_vars.append(var_name)
 
-class CacheManager:
-    """Redis-based cache manager for rate limiting and metadata"""
-    
-    def __init__(self):
-        if config.redis.ENABLED:
-            try:
-                self.redis_client = redis.from_url(config.redis.URL, decode_responses=True)
-                self.redis_client.ping()
-                logger.info("Redis connected successfully")
-            except Exception as e:
-                logger.warning(f"Redis not available: {e}. Using in-memory cache.")
-                self.redis_client = None
-                self.memory_cache = {}
-                self.lock = Lock()
-        else:
-            logger.info("Redis disabled, using in-memory cache")
-            self.redis_client = None
-            self.memory_cache = {}
-            self.lock = Lock()
-    
-    def get(self, key):
-        if self.redis_client:
-            return self.redis_client.get(key)
-        with self.lock:
-            return self.memory_cache.get(key)
-    
-    def set(self, key, value, expire=None):
-        if self.redis_client:
-            self.redis_client.set(key, value, ex=expire)
-        else:
-            with self.lock:
-                self.memory_cache[key] = value
-    
-    def incr(self, key):
-        if self.redis_client:
-            return self.redis_client.incr(key)
-        with self.lock:
-            self.memory_cache[key] = self.memory_cache.get(key, 0) + 1
-            return self.memory_cache[key]
-    
-    def delete(self, key):
-        if self.redis_client:
-            self.redis_client.delete(key)
-        else:
-            with self.lock:
-                self.memory_cache.pop(key, None)
+if missing_vars:
+    raise Exception(f"Missing environment variables: {', '.join(missing_vars)}")
 
-cache = CacheManager()
+# Initialize clients
+app = Client("wasabi_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# =============================================================================
-# SECURITY & ENCRYPTION
-# =============================================================================
-
-class SecurityManager:
-    """Handles encryption and security operations"""
+# Configure Wasabi S3 client
+try:
+    wasabi_endpoint_url = f'https://s3.{WASABI_REGION}.wasabisys.com'
     
-    def __init__(self):
-        if config.encryption.ENABLED:
-            self.cipher = Fernet(config.encryption.KEY)
-        else:
-            self.cipher = None
-            logger.info("Encryption disabled")
-    
-    def encrypt_data(self, data: str) -> str:
-        """Encrypt sensitive data"""
-        if not self.cipher:
-            return data
-        return self.cipher.encrypt(data.encode()).decode()
-    
-    def decrypt_data(self, encrypted_data: str) -> str:
-        """Decrypt sensitive data"""
-        if not self.cipher:
-            return encrypted_data
-        return self.cipher.decrypt(encrypted_data.encode()).decode()
-    
-    def generate_secure_token(self, length=32) -> str:
-        """Generate cryptographically secure token"""
-        return secrets.token_urlsafe(length)
-    
-    def validate_filename(self, filename: str) -> bool:
-        """Validate filename for security"""
-        if not filename or len(filename) > 255:
-            return False
-        
-        # Prevent path traversal
-        if '../' in filename or '..\\' in filename:
-            return False
-        
-        # Allow only safe characters
-        if not re.match(r'^[a-zA-Z0-9_\-\.\s]+$', filename):
-            return False
-        
-        return True
-
-security = SecurityManager()
-
-# =============================================================================
-# WASABI STORAGE MANAGER
-# =============================================================================
-
-class WasabiManager:
-    """Advanced Wasabi S3 operations manager"""
-    
-    def __init__(self):
-        self.s3_client = None
-        self.bucket = config.wasabi.BUCKET
-        self.initialize_client()
-    
-    def initialize_client(self):
-        """Initialize Wasabi S3 client with multiple endpoint fallbacks"""
-        endpoints = [
-            config.wasabi.ENDPOINT_URL,
-            f'https://s3.{config.wasabi.REGION}.wasabisys.com',
-            f'https://{config.wasabi.BUCKET}.s3.{config.wasabi.REGION}.wasabisys.com'
-        ]
-        
-        for endpoint in endpoints:
-            if not endpoint:
-                continue
-                
-            try:
-                self.s3_client = boto3.client(
-                    's3',
-                    endpoint_url=endpoint,
-                    aws_access_key_id=config.wasabi.ACCESS_KEY,
-                    aws_secret_access_key=config.wasabi.SECRET_KEY,
-                    region_name=config.wasabi.REGION,
-                    config=botocore.config.Config(
-                        s3={'addressing_style': 'virtual'},
-                        signature_version='s3v4',
-                        retries={'max_attempts': 3, 'mode': 'standard'}
-                    )
-                )
-                
-                # Test connection
-                self.s3_client.head_bucket(Bucket=self.bucket)
-                logger.info(f"Connected to Wasabi via {endpoint}")
-                break
-                
-            except Exception as e:
-                logger.warning(f"Failed to connect via {endpoint}: {e}")
-                continue
-        else:
-            raise Exception("Could not connect to any Wasabi endpoint")
-    
-    def get_user_storage_usage(self, user_id: int) -> int:
-        """Calculate user's total storage usage"""
-        try:
-            user_prefix = f"user_{user_id}/"
-            total_size = 0
-            
-            paginator = self.s3_client.get_paginator('list_objects_v2')
-            for page in paginator.paginate(Bucket=self.bucket, Prefix=user_prefix):
-                if 'Contents' in page:
-                    total_size += sum(obj['Size'] for obj in page['Contents'])
-            
-            return total_size
-        except Exception as e:
-            logger.error(f"Error calculating storage usage for user {user_id}: {e}")
-            return 0
-    
-    def upload_file_with_metadata(self, file_path: str, s3_key: str, metadata: dict = None):
-        """Upload file with custom metadata"""
-        extra_args = {}
-        if metadata:
-            extra_args['Metadata'] = {k: str(v) for k, v in metadata.items()}
-        
-        self.s3_client.upload_file(
-            file_path, self.bucket, s3_key,
-            ExtraArgs=extra_args
+    # Wasabi requires special configuration
+    s3_client = boto3.client(
+        's3',
+        endpoint_url=wasabi_endpoint_url,
+        aws_access_key_id=WASABI_ACCESS_KEY,
+        aws_secret_access_key=WASABI_SECRET_KEY,
+        region_name=WASABI_REGION,
+        config=boto3.session.Config(
+            s3={'addressing_style': 'virtual'},
+            signature_version='s3v4'
         )
+    )
     
-    def generate_secure_presigned_url(self, key: str, expires_in: int = None) -> str:
-        """Generate presigned URL with additional security"""
-        if expires_in is None:
-            expires_in = config.limits.PRESIGNED_URL_EXPIRY
-            
-        try:
-            return self.s3_client.generate_presigned_url(
-                'get_object',
-                Params={
-                    'Bucket': self.bucket,
-                    'Key': key,
-                },
-                ExpiresIn=expires_in,
-                HttpMethod='GET'
-            )
-        except Exception as e:
-            logger.error(f"Error generating presigned URL for {key}: {e}")
-            raise
+    # Test connection
+    s3_client.head_bucket(Bucket=WASABI_BUCKET)
+    logger.info("Successfully connected to Wasabi bucket")
     
-    def delete_user_file(self, user_id: int, filename: str) -> bool:
-        """Delete a user's file"""
-        try:
-            s3_key = f"user_{user_id}/{filename}"
-            self.s3_client.delete_object(Bucket=self.bucket, Key=s3_key)
-            logger.info(f"Deleted file {s3_key}")
-            return True
-        except Exception as e:
-            logger.error(f"Error deleting file {filename}: {e}")
-            return False
+except Exception as e:
+    logger.error(f"Wasabi connection failed: {e}")
+    # Try alternative endpoint format (some regions use different formats)
+    try:
+        wasabi_endpoint_url = f'https://{WASABI_BUCKET}.s3.{WASABI_REGION}.wasabisys.com'
+        s3_client = boto3.client(
+            's3',
+            endpoint_url=wasabi_endpoint_url,
+            aws_access_key_id=WASABI_ACCESS_KEY,
+            aws_secret_access_key=WASABI_SECRET_KEY,
+            region_name=WASABI_REGION
+        )
+        s3_client.head_bucket(Bucket=WASABI_BUCKET)
+        logger.info("Successfully connected to Wasabi bucket with alternative endpoint")
+    except Exception as alt_e:
+        logger.error(f"Alternative connection also failed: {alt_e}")
+        raise Exception(f"Could not connect to Wasabi: {alt_e}")
 
-wasabi_manager = WasabiManager()
-
-# =============================================================================
-# RATE LIMITING & THROTTLING
-# =============================================================================
-
-class RateLimiter:
-    """Advanced rate limiting with sliding window"""
-    
-    def __init__(self):
-        self.cache = cache
-    
-    def is_rate_limited(self, user_id: int, action: str = "default") -> bool:
-        """Check if user is rate limited for specific action"""
-        key = f"rate_limit:{user_id}:{action}"
-        window_key = f"{key}:window"
-        
-        current_time = time.time()
-        window_start = self.cache.get(window_key)
-        
-        if not window_start:
-            # First request in new window
-            self.cache.set(window_key, current_time, config.limits.RATE_LIMIT_PERIOD)
-            self.cache.set(key, 1, config.limits.RATE_LIMIT_PERIOD)
-            return False
-        
-        window_start = float(window_start)
-        
-        if current_time - window_start > config.limits.RATE_LIMIT_PERIOD:
-            # Start new window
-            self.cache.set(window_key, current_time, config.limits.RATE_LIMIT_PERIOD)
-            self.cache.set(key, 1, config.limits.RATE_LIMIT_PERIOD)
-            return False
-        
-        # Increment request count
-        request_count = self.cache.incr(key)
-        
-        if request_count > config.limits.RATE_LIMIT_REQUESTS:
-            return True
-        
-        return False
-    
-    def get_retry_after(self, user_id: int, action: str = "default") -> int:
-        """Get seconds until user can make next request"""
-        key = f"rate_limit:{user_id}:{action}:window"
-        window_start = self.cache.get(key)
-        
-        if not window_start:
-            return 0
-        
-        return int(config.limits.RATE_LIMIT_PERIOD - (time.time() - float(window_start)))
-
-rate_limiter = RateLimiter()
-
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-class Utilities:
-    """Collection of utility functions"""
-    
-    @staticmethod
-    def get_file_type(filename: str) -> str:
-        """Determine file type from extension"""
-        ext = os.path.splitext(filename)[1].lower()
-        for file_type, extensions in config.MEDIA_EXTENSIONS.items():
-            if ext in extensions:
-                return file_type
-        return 'other'
-    
-    @staticmethod
-    def humanbytes(size: int) -> str:
-        """Convert bytes to human readable format"""
-        if not size:
-            return "0 B"
-        
-        units = ["B", "KB", "MB", "GB", "TB"]
-        for unit in units:
-            if size < 1024.0 or unit == units[-1]:
-                return f"{size:.2f} {unit}"
-            size /= 1024.0
-    
-    @staticmethod
-    def sanitize_filename(filename: str) -> str:
-        """Sanitize filename removing dangerous characters"""
-        # Remove path components
-        filename = os.path.basename(filename)
-        
-        # Replace unsafe characters
-        filename = re.sub(r'[^\w\s\-\.]', '_', filename)
-        
-        # Limit length
-        if len(filename) > 200:
-            name, ext = os.path.splitext(filename)
-            filename = name[:200-len(ext)] + ext
-        
-        return filename
-    
-    @staticmethod
-    def create_progress_bar(percentage: float, length: int = 20) -> str:
-        """Create visual progress bar"""
-        filled = int(length * percentage / 100)
-        empty = length - filled
-        return '█' * filled + '○' * empty
-    
-    @staticmethod
-    def format_duration(seconds: float) -> str:
-        """Format duration in human readable format"""
-        if seconds < 60:
-            return f"{int(seconds)}s"
-        elif seconds < 3600:
-            return f"{int(seconds // 60)}m {int(seconds % 60)}s"
-        else:
-            hours = int(seconds // 3600)
-            minutes = int((seconds % 3600) // 60)
-            return f"{hours}h {minutes}m"
-    
-    @staticmethod
-    def generate_player_url(filename: str, presigned_url: str) -> Optional[str]:
-        """Generate web player URL for supported media types"""
-        if not config.server.RENDER_URL:
-            return None
-        
-        file_type = Utilities.get_file_type(filename)
-        if file_type in ['video', 'audio', 'image']:
-            encoded_url = base64.urlsafe_b64encode(
-                presigned_url.encode()
-            ).decode().rstrip('=')
-            return f"{config.server.RENDER_URL}/player/{file_type}/{encoded_url}"
-        return None
-
-utils = Utilities()
-
-# =============================================================================
-# FLASK APPLICATION
-# =============================================================================
-
+# -----------------------------
+# Flask app for player.html
+# -----------------------------
 flask_app = Flask(__name__, template_folder="templates")
-flask_app.secret_key = config.server.SECRET_KEY
 
-@flask_app.route('/')
+@flask_app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
 
-@flask_app.route('/player/<media_type>/<encoded_url>')
+@flask_app.route("/player/<media_type>/<encoded_url>")
 def player(media_type, encoded_url):
     try:
-        # Add padding for base64 decoding
+        # Add padding if needed for base64 decoding
         padding = 4 - (len(encoded_url) % 4)
         if padding != 4:
             encoded_url += '=' * padding
-        
         media_url = base64.urlsafe_b64decode(encoded_url).decode()
-        return render_template('player.html', media_type=media_type, media_url=media_url)
-    
+        return render_template("player.html", media_type=media_type, media_url=media_url)
     except Exception as e:
         return f"Error decoding URL: {str(e)}", 400
 
-@flask_app.route('/about')
+@flask_app.route("/about")
 def about():
-    return render_template('about.html')
-
-@flask_app.route('/health')
-def health_check():
-    """Health check endpoint for monitoring"""
-    health_status = {
-        'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat(),
-        'version': '2.0.0',
-        'services': {
-            'wasabi': 'unknown',
-            'redis': 'unknown',
-            'telegram': 'unknown'
-        }
-    }
-    
-    # Check Wasabi
-    try:
-        wasabi_manager.s3_client.head_bucket(Bucket=config.wasabi.BUCKET)
-        health_status['services']['wasabi'] = 'healthy'
-    except Exception as e:
-        health_status['services']['wasabi'] = 'unhealthy'
-        health_status['status'] = 'degraded'
-    
-    # Check Redis
-    try:
-        if cache.redis_client:
-            cache.redis_client.ping()
-            health_status['services']['redis'] = 'healthy'
-        else:
-            health_status['services']['redis'] = 'disabled'
-    except Exception as e:
-        health_status['services']['redis'] = 'unhealthy'
-        health_status['status'] = 'degraded'
-    
-    return jsonify(health_status)
-
-@flask_app.route('/metrics')
-def metrics():
-    """Prometheus metrics endpoint"""
-    if config.monitoring.ENABLE_METRICS:
-        return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
-    else:
-        return "Metrics disabled", 404
+    return render_template("about.html")
 
 def run_flask():
-    """Run Flask application"""
-    flask_app.run(
-        host=config.server.HOST,
-        port=config.server.PORT,
-        debug=False,
-        threaded=True
-    )
+    flask_app.run(host="0.0.0.0", port=8000, debug=False)
 
-# =============================================================================
-# TELEGRAM BOT
-# =============================================================================
+# -----------------------------
+# Helper Functions
+# -----------------------------
+MEDIA_EXTENSIONS = {
+    'video': ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'],
+    'audio': ['.mp3', '.m4a', '.ogg', '.wav', '.flac'],
+    'image': ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+}
 
-# Initialize Pyrogram client
-app = Client(
-    "wasabi_bot",
-    api_id=config.telegram.API_ID,
-    api_hash=config.telegram.API_HASH,
-    bot_token=config.telegram.BOT_TOKEN,
-    workers=100,
-    sleep_threshold=60
-)
+def get_file_type(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    for file_type, extensions in MEDIA_EXTENSIONS.items():
+        if ext in extensions:
+            return file_type
+    return 'other'
 
-class BotHandlers:
-    """Advanced bot message handlers"""
+def generate_player_url(filename, presigned_url):
+    if not RENDER_URL:
+        return None
+    file_type = get_file_type(filename)
+    if file_type in ['video', 'audio', 'image']:
+        encoded_url = base64.urlsafe_b64encode(presigned_url.encode()).decode().rstrip('=')
+        return f"{RENDER_URL}/player/{file_type}/{encoded_url}"
+    return None
+
+def humanbytes(size):
+    """Convert bytes to human readable format"""
+    if not size:
+        return "0 B"
+    power = 1024
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if size < power:
+            return f"{size:.2f} {unit}"
+        size /= power
+    return f"{size:.2f} TB"
+
+def sanitize_filename(filename):
+    """Remove potentially dangerous characters from filenames"""
+    filename = re.sub(r'[^a-zA-Z0-9 _.-]', '_', filename)
+    if len(filename) > 200:
+        name, ext = os.path.splitext(filename)
+        filename = name[:200-len(ext)] + ext
+    return filename
+
+def get_user_folder(user_id):
+    return f"user_{user_id}"
+
+def create_download_keyboard(presigned_url, player_url=None):
+    """Create inline keyboard with download option"""
+    keyboard = []
     
-    @staticmethod
-    async def send_typing_action(chat_id: int):
-        """Send typing action to indicate bot is processing"""
-        try:
-            await app.send_chat_action(chat_id, enums.ChatAction.TYPING)
-        except Exception as e:
-            logger.debug(f"Could not send typing action: {e}")
+    if player_url:
+        keyboard.append([InlineKeyboardButton("🎬 Web Player", url=player_url)])
     
-    @staticmethod
-    async def handle_large_file_upload(message: Message, file_size: int) -> bool:
-        """Check if user can upload large file based on storage limits"""
-        user_id = message.from_user.id
-        current_usage = wasabi_manager.get_user_storage_usage(user_id)
-        
-        if current_usage + file_size > config.limits.MAX_USER_STORAGE:
-            await message.reply_text(
-                f"❌ Storage limit exceeded!\n\n"
-                f"Current usage: {utils.humanbytes(current_usage)}\n"
-                f"File size: {utils.humanbytes(file_size)}\n"
-                f"Limit: {utils.humanbytes(config.limits.MAX_USER_STORAGE)}\n\n"
-                f"Please delete some files to free up space."
-            )
-            return False
+    keyboard.append([InlineKeyboardButton("📥 Direct Download", url=presigned_url)])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def create_progress_bar(percentage, length=20):
+    """Create a visual progress bar"""
+    filled = int(length * percentage / 100)
+    empty = length - filled
+    return '█' * filled + '○' * empty
+
+def format_eta(seconds):
+    """Format seconds into human readable ETA"""
+    if seconds <= 0:
+        return "00:00"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
+    return f"{int(minutes):02d}:{int(seconds):02d}"
+
+def format_elapsed(seconds):
+    """Format elapsed time"""
+    return f"{int(seconds // 60):02d}:{int(seconds % 60):02d}"
+
+# Rate limiting
+user_requests = defaultdict(list)
+
+def is_rate_limited(user_id, limit=5, period=60):
+    now = datetime.now()
+    user_requests[user_id] = [req_time for req_time in user_requests[user_id] if now - req_time < timedelta(seconds=period)]
+    
+    if len(user_requests[user_id]) >= limit:
         return True
     
-    @staticmethod
-    def create_advanced_keyboard(presigned_url: str, player_url: str = None, 
-                               filename: str = None) -> InlineKeyboardMarkup:
-        """Create advanced inline keyboard with multiple options"""
-        keyboard = []
-        
-        if player_url:
-            keyboard.append([
-                InlineKeyboardButton("🎬 Web Player", url=player_url),
-                InlineKeyboardButton("📱 Mobile Friendly", url=player_url)
-            ])
-        
-        keyboard.append([InlineKeyboardButton("📥 Direct Download", url=presigned_url)])
-        
-        if filename and utils.get_file_type(filename) in ['video', 'audio']:
-            keyboard.append([
-                InlineKeyboardButton("🔗 Share Link", 
-                                   switch_inline_query=filename),
-                InlineKeyboardButton("🗑️ Delete", 
-                                   callback_data=f"delete_{filename}")
-            ])
-        
-        return InlineKeyboardMarkup(keyboard)
+    user_requests[user_id].append(now)
+    return False
 
-# =============================================================================
-# BOT COMMAND HANDLERS
-# =============================================================================
-
+# -----------------------------
+# Bot Handlers
+# -----------------------------
 @app.on_message(filters.command("start"))
 async def start_command(client, message: Message):
-    if rate_limiter.is_rate_limited(message.from_user.id, "start"):
-        retry_after = rate_limiter.get_retry_after(message.from_user.id, "start")
-        await message.reply_text(
-            f"⏰ Too many requests. Please try again in {retry_after} seconds."
-        )
+    if is_rate_limited(message.from_user.id):
+        await message.reply_text("Too many requests. Please try again in a minute.")
         return
-    
-    await BotHandlers.send_typing_action(message.chat.id)
-    
-    user_storage = wasabi_manager.get_user_storage_usage(message.from_user.id)
-    
-    welcome_text = f"""
-🚀 **Advanced Cloud Storage Bot** 🚀
-
-**📊 Your Storage:** {utils.humanbytes(user_storage)} / {utils.humanbytes(config.limits.MAX_USER_STORAGE)}
-**📁 Max File Size:** {utils.humanbytes(config.limits.MAX_FILE_SIZE)}
-
-**✨ Features:**
-• Secure Wasabi Cloud Storage
-• Web Player for Media Files
-• Advanced Progress Tracking
-• Storage Management
-• Rate Limiting Protection
-
-**📋 Available Commands:**
-/start - Show this message
-/upload - Upload files to cloud
-/download <filename> - Download files
-/play <filename> - Get web player link
-/list - List your files
-/delete <filename> - Delete files
-/stats - Show storage statistics
-/help - Get help
-
-**🔒 Security:**
-• Encrypted file metadata
-• Secure presigned URLs
-• Rate limiting enabled
-• File type validation
-
-**💎 Owner:** @Sathishkumar33
-**📧 Support:** mraprguild@gmail.com
-    """
-    
-    await message.reply_text(welcome_text, parse_mode=enums.ParseMode.MARKDOWN)
-
-@app.on_message(filters.command("upload"))
-async def upload_command(client, message: Message):
-    """Handle upload command with enhanced features"""
-    if rate_limiter.is_rate_limited(message.from_user.id, "upload"):
-        retry_after = rate_limiter.get_retry_after(message.from_user.id, "upload")
-        await message.reply_text(
-            f"⏰ Too many upload requests. Please try again in {retry_after} seconds."
-        )
-        return
-    
-    await BotHandlers.send_typing_action(message.chat.id)
-    
-    if not message.reply_to_message or not (
-        message.reply_to_message.document or 
-        message.reply_to_message.video or 
-        message.reply_to_message.audio or
-        message.reply_to_message.photo
-    ):
-        await message.reply_text(
-            "📎 Please reply to a file with /upload to upload it to cloud storage."
-        )
-        return
-    
-    # Use the existing upload handler
-    await upload_file_handler(client, message.reply_to_message)
+        
+    await message.reply_text(
+        "🚀 Cloud Storage Bot with Web Player\n\n"
+        "Send me any file to upload to Wasabi storage\n"
+        "Use /download <filename> to download files\n"
+        "Use /play <filename> to get web player links\n"
+        "Use /list to see your files\n"
+        "Use /delete <filename> to remove files\n\n"
+        "<b>⚡ Extreme Performance Features:</b>\n"
+        "• 2GB file size support\n"
+        "• Real-time speed monitoring with smoothing\n"
+        "• Memory optimization for large files\n"
+        "• TCP Keepalive for stable connections\n\n"
+        "<b>💎 Owner:</b> Mraprguild\n"
+        "<b>📧 Email:</b> mraprguild@gmail.com\n"
+        "<b>📱 Telegram:</b> @Sathishkumar33"
+    )
 
 @app.on_message(filters.document | filters.video | filters.audio | filters.photo)
 async def upload_file_handler(client, message: Message):
-    """Enhanced file upload handler with progress tracking"""
-    user_id = message.from_user.id
-    
-    if rate_limiter.is_rate_limited(user_id, "upload"):
+    if is_rate_limited(message.from_user.id):
+        await message.reply_text("Too many requests. Please try again in a minute.")
         return
-    
-    # Get file information
+        
     media = message.document or message.video or message.audio or message.photo
     if not media:
-        await message.reply_text("❌ Unsupported file type")
+        await message.reply_text("Unsupported file type")
         return
-    
+
     # Get file size
     if message.photo:
+        # For photos, get the largest available size
         file_size = message.photo.sizes[-1].file_size
-        file_name = f"photo_{message.id}.jpg"
     else:
         file_size = media.file_size
-        file_name = media.file_name if hasattr(media, 'file_name') else f"file_{message.id}"
     
-    file_name = utils.sanitize_filename(file_name)
-    
-    # Validate file size
-    if file_size > config.limits.MAX_FILE_SIZE:
-        await message.reply_text(
-            f"❌ File too large!\n"
-            f"Size: {utils.humanbytes(file_size)}\n"
-            f"Limit: {utils.humanbytes(config.limits.MAX_FILE_SIZE)}"
-        )
+    # Check file size limit
+    if file_size > MAX_FILE_SIZE:
+        await message.reply_text(f"File too large. Maximum size is {humanbytes(MAX_FILE_SIZE)}")
         return
-    
-    # Check storage limits
-    if not await BotHandlers.handle_large_file_upload(message, file_size):
-        return
-    
-    # Start upload process
-    status_message = await message.reply_text(
-        f"📥 **Downloading...**\n"
-        f"📁 `{file_name}`\n"
-        f"📊 {utils.humanbytes(file_size)}\n"
-        f"⏳ Initializing..."
-    )
-    
-    download_start = time.time()
-    last_update_time = download_start
+
+    status_message = await message.reply_text("📥 Downloading...\n[○○○○○○○○○○○○] 0.0%\nProcessed: 0.00B of 0000MB\nSpeed: 0.00B/s | ETA: -\nElapsed: 00s\nUpload: Telegram\nDownload: Wasabi")
+
+    download_start_time = time.time()
+    last_update_time = time.time()
     processed_bytes = 0
     last_processed_bytes = 0
-    
-    if config.monitoring.ENABLE_METRICS:
-        ACTIVE_UPLOADS.inc()
-    
+    start_time = time.time()
+
     async def progress_callback(current, total):
         nonlocal processed_bytes, last_update_time, last_processed_bytes
-        
         processed_bytes = current
         current_time = time.time()
         
-        # Update every 1 second or when significant progress is made
-        if current_time - last_update_time >= 1 or current == total:
+        # Update progress every 1 second to avoid flooding
+        if current_time - last_update_time >= 1:
             percentage = (current / total) * 100
-            elapsed = current_time - download_start
+            elapsed_time = current_time - start_time
             
-            # Calculate speed with smoothing
-            time_diff = current_time - last_update_time
-            if time_diff > 0:
-                instant_speed = (current - last_processed_bytes) / time_diff
-            else:
-                instant_speed = 0
+            # Calculate speed
+            speed = (current - last_processed_bytes) / (current_time - last_update_time)
             
             # Calculate ETA
-            if instant_speed > 0:
-                eta = (total - current) / instant_speed
+            if speed > 0:
+                eta = (total - current) / speed
             else:
                 eta = 0
             
-            progress_bar = utils.create_progress_bar(percentage)
-            
+            # Format progress message
+            progress_bar = create_progress_bar(percentage)
             progress_text = (
-                f"📥 **Downloading...**\n"
-                f"📁 `{file_name}`\n"
-                f"📊 {utils.humanbytes(current)} / {utils.humanbytes(total)}\n"
-                f"📈 {utils.humanbytes(instant_speed)}/s\n"
-                f"⏱️ ETA: {utils.format_duration(eta)}\n"
-                f"🕒 Elapsed: {utils.format_duration(elapsed)}\n"
-                f"`[{progress_bar}] {percentage:.1f}%`"
+                f"📥 Downloading...\n"
+                f"[{progress_bar}] {percentage:.1f}%\n"
+                f"Processed: {humanbytes(current)} of {humanbytes(total)}\n"
+                f"Speed: {humanbytes(speed)}/s | ETA: {format_eta(eta)}\n"
+                f"Elapsed: {format_elapsed(elapsed_time)}\n"
+                f"Upload: Telegram\n"
+                f"Download: Wasabi"
             )
             
             try:
-                await status_message.edit_text(progress_text, parse_mode=enums.ParseMode.MARKDOWN)
+                await status_message.edit_text(progress_text)
                 last_update_time = current_time
                 last_processed_bytes = current
             except FloodWait as e:
                 await asyncio.sleep(e.value)
-            except Exception as e:
-                logger.debug(f"Progress update failed: {e}")
-    
+            except Exception:
+                pass  # Ignore other errors during progress updates
+
     try:
-        # Download file
+        # Download file with progress callback
         file_path = await message.download(progress=progress_callback)
+        file_name = sanitize_filename(os.path.basename(file_path))
+        user_file_name = f"{get_user_folder(message.from_user.id)}/{file_name}"
+        
+        # Update status to uploading
+        await status_message.edit_text("📤 Uploading to Wasabi...")
         
         # Upload to Wasabi
-        await status_message.edit_text("📤 **Uploading to Wasabi Cloud...**")
-        
-        user_file_key = f"user_{user_id}/{file_name}"
-        
-        # Upload with metadata
-        metadata = {
-            'upload-time': str(int(time.time())),
-            'user-id': str(user_id),
-            'file-size': str(file_size),
-            'original-message': str(message.id)
-        }
-        
         await asyncio.to_thread(
-            wasabi_manager.upload_file_with_metadata,
-            file_path, user_file_key, metadata
+            s3_client.upload_file,
+            file_path,
+            WASABI_BUCKET,
+            user_file_name
         )
         
-        # Generate shareable URLs
-        presigned_url = wasabi_manager.generate_secure_presigned_url(user_file_key)
-        player_url = utils.generate_player_url(file_name, presigned_url)
-        
-        # Create keyboard
-        keyboard = BotHandlers.create_advanced_keyboard(presigned_url, player_url, file_name)
-        
-        total_time = time.time() - download_start
-        upload_speed = file_size / total_time if total_time > 0 else 0
-        
-        success_text = (
-            f"✅ **Upload Complete!**\n\n"
-            f"📁 **File:** `{file_name}`\n"
-            f"📊 **Size:** {utils.humanbytes(file_size)}\n"
-            f"⚡ **Speed:** {utils.humanbytes(upload_speed)}/s\n"
-            f"⏱️ **Time:** {utils.format_duration(total_time)}\n"
-            f"🔗 **Expires:** {config.limits.PRESIGNED_URL_EXPIRY // 3600} hours\n\n"
-            f"**Your file is now securely stored in the cloud!** ☁️"
+        # Generate shareable link
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object', 
+            Params={'Bucket': WASABI_BUCKET, 'Key': user_file_name}, 
+            ExpiresIn=86400
         )
+        
+        # Generate player URL if supported
+        player_url = generate_player_url(file_name, presigned_url)
+        
+        # Create keyboard with options
+        keyboard = create_download_keyboard(presigned_url, player_url)
+        
+        total_time = time.time() - start_time
+        response_text = (
+            f"✅ Upload complete!\n\n"
+            f"📁 File: {file_name}\n"
+            f"📦 Size: {humanbytes(file_size)}\n"
+            f"⏱️ Time: {format_elapsed(total_time)}\n"
+            f"⏰ Link expires: 24 hours"
+        )
+        
+        if player_url:
+            response_text += f"\n\n🎬 Web Player: {player_url}"
         
         await status_message.edit_text(
-            success_text,
-            reply_markup=keyboard,
-            parse_mode=enums.ParseMode.MARKDOWN
+            response_text,
+            reply_markup=keyboard
         )
-        
-        if config.monitoring.ENABLE_METRICS:
-            UPLOAD_SIZE.observe(file_size)
-            PROCESSING_TIME.observe(total_time)
         
     except Exception as e:
-        logger.error(f"Upload error for user {user_id}: {e}")
-        error_text = (
-            f"❌ **Upload Failed**\n\n"
-            f"**Error:** `{str(e)}`\n\n"
-            f"Please try again or contact support if the problem persists."
-        )
-        await status_message.edit_text(error_text, parse_mode=enums.ParseMode.MARKDOWN)
-    
+        logger.error(f"Upload error: {e}")
+        await status_message.edit_text(f"❌ Error: {str(e)}")
     finally:
-        # Cleanup
         if 'file_path' in locals() and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except Exception as e:
-                logger.warning(f"Could not delete temp file {file_path}: {e}")
+            os.remove(file_path)
+
+@app.on_message(filters.command("download"))
+async def download_file_handler(client, message: Message):
+    if is_rate_limited(message.from_user.id):
+        await message.reply_text("Too many requests. Please try again in a minute.")
+        return
         
-        if config.monitoring.ENABLE_METRICS:
-            ACTIVE_UPLOADS.dec()
+    if len(message.command) < 2:
+        await message.reply_text("Usage: /download <filename>")
+        return
 
-# ... (other handlers remain the same as in previous version, just update config references)
-
-# =============================================================================
-# STARTUP & SHUTDOWN
-# =============================================================================
-
-@app.on_raw_update()
-async def raw_update_handler(_, update, *args):
-    """Handle raw updates for metrics"""
-    if config.monitoring.ENABLE_METRICS:
-        REQUEST_COUNT.labels(endpoint='raw_update', method='POST', status='200').inc()
-
-async def startup():
-    """Bot startup routine"""
-    logger.info("🤖 Starting Advanced Wasabi Storage Bot...")
+    file_name = " ".join(message.command[1:])
+    user_file_name = f"{get_user_folder(message.from_user.id)}/{file_name}"
     
-    # Test connections
+    status_message = await message.reply_text(f"Generating download link for {file_name}...")
+    
     try:
-        wasabi_manager.s3_client.head_bucket(Bucket=config.wasabi.BUCKET)
-        logger.info("✅ Wasabi connection verified")
+        # Check if file exists
+        s3_client.head_object(Bucket=WASABI_BUCKET, Key=user_file_name)
+        
+        # Generate presigned URL
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object', 
+            Params={'Bucket': WASABI_BUCKET, 'Key': user_file_name}, 
+            ExpiresIn=86400
+        )
+        
+        # Generate player URL if supported
+        player_url = generate_player_url(file_name, presigned_url)
+        
+        # Create keyboard with options
+        keyboard = create_download_keyboard(presigned_url, player_url)
+        
+        response_text = f"📥 Download ready for: {file_name}\n⏰ Link expires: 24 hours"
+        
+        if player_url:
+            response_text += f"\n\n🎬 Web Player: {player_url}"
+        
+        await status_message.edit_text(
+            response_text,
+            reply_markup=keyboard
+        )
+
+    except botocore.exceptions.ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code == '404':
+            await status_message.edit_text("File not found.")
+        else:
+            await status_message.edit_text(f"S3 Error: {str(e)}")
     except Exception as e:
-        logger.error(f"❌ Wasabi connection failed: {e}")
-        raise
+        logger.error(f"Download error: {e}")
+        await status_message.edit_text(f"Error: {str(e)}")
+
+@app.on_message(filters.command("play"))
+async def play_file(client, message: Message):
+    if is_rate_limited(message.from_user.id):
+        await message.reply_text("Too many requests. Please try again in a minute.")
+        return
+        
+    try:
+        if len(message.command) < 2:
+            await message.reply_text("Please specify a filename. Usage: /play filename")
+            return
+            
+        filename = " ".join(message.command[1:])
+        user_folder = get_user_folder(message.from_user.id)
+        user_file_name = f"{user_folder}/{filename}"
+        
+        # Generate a presigned URL
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': WASABI_BUCKET, 'Key': user_file_name},
+            ExpiresIn=86400
+        )
+        
+        player_url = generate_player_url(filename, presigned_url)
+        
+        if player_url:
+            await message.reply_text(
+                f"Player link for {filename}:\n\n{player_url}\n\n"
+                "This link will expire in 24 hours."
+            )
+        else:
+            await message.reply_text("This file type doesn't support web playback.")
+        
+    except Exception as e:
+        await message.reply_text(f"File not found or error generating player link: {str(e)}")
+
+@app.on_message(filters.command("list"))
+async def list_files(client, message: Message):
+    if is_rate_limited(message.from_user.id):
+        await message.reply_text("Too many requests. Please try again in a minute.")
+        return
+        
+    try:
+        user_prefix = get_user_folder(message.from_user.id) + "/"
+        response = s3_client.list_objects_v2(
+            Bucket=WASABI_BUCKET, 
+            Prefix=user_prefix
+        )
+        
+        if 'Contents' not in response:
+            await message.reply_text("No files found")
+            return
+        
+        files = [obj['Key'].replace(user_prefix, "") for obj in response['Contents']]
+        files_list = "\n".join([f"• {file}" for file in files[:15]])  # Show first 15 files
+        
+        if len(files) > 15:
+            files_list += f"\n\n...and {len(files) - 15} more files"
+        
+        await message.reply_text(f"📁 Your files:\n\n{files_list}")
     
-    logger.info("✅ Bot startup completed")
+    except Exception as e:
+        logger.error(f"List files error: {e}")
+        await message.reply_text(f"Error: {str(e)}")
 
-async def shutdown():
-    """Bot shutdown routine"""
-    logger.info("🛑 Shutting down bot...")
-    # Cleanup resources if needed
+@app.on_message(filters.command("delete"))
+async def delete_file(client, message: Message):
+    if is_rate_limited(message.from_user.id):
+        await message.reply_text("Too many requests. Please try again in a minute.")
+        return
+        
+    if len(message.command) < 2:
+        await message.reply_text("Usage: /delete <filename>")
+        return
 
-# =============================================================================
-# MAIN EXECUTION
-# =============================================================================
+    file_name = " ".join(message.command[1:])
+    user_file_name = f"{get_user_folder(message.from_user.id)}/{file_name}"
+    
+    try:
+        # Delete file from Wasabi
+        s3_client.delete_object(
+            Bucket=WASABI_BUCKET,
+            Key=user_file_name
+        )
+        
+        await message.reply_text(f"✅ Deleted: {file_name}")
+    
+    except Exception as e:
+        logger.error(f"Delete error: {e}")
+        await message.reply_text(f"Error: {str(e)}")
+
+# -----------------------------
+# Flask Server Startup
+# -----------------------------
+print("Starting Flask server on port 8000...")
+Thread(target=run_flask, daemon=True).start()
 
 if __name__ == "__main__":
-    print("🚀 Starting Advanced Wasabi Storage Bot with Web Player...")
-    print(f"📊 Metrics enabled: {config.monitoring.ENABLE_METRICS}")
-    print(f"💾 Max file size: {utils.humanbytes(config.limits.MAX_FILE_SIZE)}")
-    print(f"👤 User storage: {utils.humanbytes(config.limits.MAX_USER_STORAGE)}")
-    print(f"🔒 Encryption: {config.encryption.ENABLED}")
-    print(f"🗄️ Redis: {config.redis.ENABLED}")
-    
-    # Start Flask server in background thread
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    print(f"🌐 Flask server started on {config.server.HOST}:{config.server.PORT}")
-    
-    # Start the bot
-    try:
-        app.run(startup(), shutdown())
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user")
-    except Exception as e:
-        logger.critical(f"Bot crashed: {e}")
-        raise
+    print("Starting Wasabi Storage Bot with Web Player...")
+    app.run()
