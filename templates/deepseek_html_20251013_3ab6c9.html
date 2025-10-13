@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About - Cloud Storage Bot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 50px;
+            color: white;
+        }
+
+        .header h1 {
+            font-size: 3em;
+            margin-bottom: 15px;
+            font-weight: 300;
+        }
+
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+
+        .content-card {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            margin-bottom: 30px;
+        }
+
+        .section {
+            margin-bottom: 40px;
+        }
+
+        .section h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 2em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section p {
+            margin-bottom: 15px;
+            color: #555;
+        }
+
+        .feature-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .feature-list li {
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .feature-list li:last-child {
+            border-bottom: none;
+        }
+
+        .tech-stack {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .tech-item {
+            background: rgba(102, 126, 234, 0.1);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .tech-item h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 12px 25px;
+            border-radius: 25px;
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            border: none;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        .contact-info {
+            background: rgba(102, 126, 234, 0.1);
+            padding: 25px;
+            border-radius: 15px;
+            margin-top: 20px;
+        }
+
+        .contact-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .contact-item:last-child {
+            margin-bottom: 0;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 2.2em;
+            }
+            
+            .content-card {
+                padding: 25px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>About Cloud Storage Bot</h1>
+            <p>Learn more about our secure file storage and streaming platform</p>
+        </div>
+
+        <div class="content-card">
+            <div class="section">
+                <h2>📖 Overview</h2>
+                <p>Cloud Storage Bot is a powerful Telegram bot that provides secure cloud storage and media streaming capabilities. Built with performance and user experience in mind, it allows users to store, manage, and stream their files with ease.</p>
+                <p>Our platform leverages Wasabi cloud storage for enterprise-grade security and reliability, ensuring your files are always safe and accessible.</p>
+            </div>
+
+            <div class="section">
+                <h2>🚀 Key Features</h2>
+                <ul class="feature-list">
+                    <li>📁 <strong>File Upload & Storage</strong> - Upload files up to 2GB directly through Telegram</li>
+                    <li>🎬 <strong>Web Player</strong> - Stream videos, audio, and view images in browser</li>
+                    <li>🔗 <strong>Shareable Links</strong> - Generate secure links with 24-hour expiration</li>
+                    <li>📱 <strong>Mobile Optimized</strong> - Fully responsive design for all devices</li>
+                    <li>⚡ <strong>High Performance</strong> - Fast uploads and downloads with progress tracking</li>
+                    <li>🔒 <strong>Secure Storage</strong> - Military-grade encryption for all files</li>
+                    <li>🔄 <strong>File Management</strong> - List, download, and delete files easily</li>
+                    <li>🎮 <strong>Advanced Player</strong> - Full media controls and keyboard shortcuts</li>
+                </ul>
+            </div>
+
+            <div class="section">
+                <h2>🛠️ Technology Stack</h2>
+                <p>Our platform is built using modern technologies to ensure reliability and performance:</p>
+                <div class="tech-stack">
+                    <div class="tech-item">
+                        <h4>Python</h4>
+                        <p>Backend logic and bot handling</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Pyrogram</h4>
+                        <p>Telegram Bot API framework</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Flask</h4>
+                        <p>Web server and player interface</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>Wasabi S3</h4>
+                        <p>Cloud storage infrastructure</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>HTML5</h4>
+                        <p>Modern web player interface</p>
+                    </div>
+                    <div class="tech-item">
+                        <h4>CSS3</h4>
+                        <p>Responsive design and animations</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>👨‍💻 Developer</h2>
+                <p><strong>Mraprguild</strong> - Full Stack Developer & Bot Creator</p>
+                <p>Passionate about creating innovative solutions that solve real-world problems. Specializing in cloud infrastructure, bot development, and web applications.</p>
+                
+                <div class="contact-info">
+                    <h3>Contact Information</h3>
+                    <div class="contact-item">
+                        <strong>📧 Email:</strong> mraprguild@gmail.com
+                    </div>
+                    <div class="contact-item">
+                        <strong>📱 Telegram:</strong> @Sathishkumar33
+                    </div>
+                    <div class="contact-item">
+                        <strong>💼 Services:</strong> Bot Development, Cloud Solutions, Web Applications
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>🔧 How to Use</h2>
+                <p><strong>1.</strong> Start a conversation with the bot on Telegram</p>
+                <p><strong>2.</strong> Use /start to see available commands</p>
+                <p><strong>3.</strong> Send any file to upload it to cloud storage</p>
+                <p><strong>4.</strong> Use /play filename to get web player links</p>
+                <p><strong>5.</strong> Use /download filename for direct download links</p>
+                <p><strong>6.</strong> Use /list to see all your files</p>
+                <p><strong>7.</strong> Use /delete filename to remove files</p>
+            </div>
+
+            <div style="text-align: center; margin-top: 40px;">
+                <a href="/" class="btn">🏠 Back to Home</a>
+                <a href="https://t.me/your_bot_username" class="btn" target="_blank">🤖 Start Using Bot</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Add smooth scrolling for any anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+                }
+            });
+        });
+    </script>
+</body>
+</html>
