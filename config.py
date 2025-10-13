@@ -15,7 +15,7 @@ WASABI_REGION = os.environ.get("WASABI_REGION")
 WASABI_ENDPOINT_URL = f"https://s3.{WASABI_REGION}.wasabisys.com"
 
 # Render configuration
-RENDER_EXTERNAL_URL = "RENDER_EXTERNAL_URL"  # Your Render app URL
+BASE_URL = "RENDER_EXTERNAL_URL"  # Your Render app URL
 # Validate required variables
 required_vars = {
     "API_ID": API_ID,
@@ -26,7 +26,7 @@ required_vars = {
     "WASABI_SECRET_KEY": WASABI_SECRET_KEY,
     "WASABI_BUCKET": WASABI_BUCKET,
     "WASABI_REGION": WASABI_REGION,
-    "RENDER_EXTERNAL_URL": RENDER_EXTERNAL_URL
+    "BASE_URL": RENDER_EXTERNAL_URL
 }
 
 missing_vars = [var for var, value in required_vars.items() if not value]
