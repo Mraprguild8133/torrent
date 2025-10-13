@@ -15,7 +15,7 @@ WASABI_REGION = os.environ.get("WASABI_REGION")
 WASABI_ENDPOINT_URL = f"https://s3.{WASABI_REGION}.wasabisys.com"
 
 # Render configuration
-BASE_URL = "RENDER_EXTERNAL_URL"  # Your Render app URL
+BASE_URL = "BASE_URL"  # Your Render app URL
 # Validate required variables
 required_vars = {
     "API_ID": API_ID,
