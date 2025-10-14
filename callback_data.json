@@ -1,4 +1,60 @@
 {
+  "users": {
+    "admin": {
+      "id": 0,
+      "username": "admin",
+      "added_date": "2024-01-01T00:00:00Z",
+      "permissions": ["all"],
+      "role": "administrator",
+      "last_active": "2024-01-01T00:00:00Z",
+      "is_active": true
+    }
+  },
+  "settings": {
+    "max_users": 100,
+    "auto_cleanup_days": 30,
+    "session_timeout_days": 90,
+    "default_permissions": ["upload", "download", "stream", "copy_links"],
+    "admin_permissions": ["all", "user_management", "file_deletion", "statistics", "system_control"],
+    "enable_user_activity_tracking": true
+  },
+  "statistics": {
+    "total_users": 1,
+    "active_users": 1,
+    "inactive_users": 0,
+    "last_user_added": null,
+    "last_user_removed": null,
+    "user_additions_today": 0,
+    "user_removals_today": 0,
+    "total_sessions": 0
+  },
+  "backup": {
+    "last_backup": null,
+    "backup_interval_hours": 24,
+    "keep_backups": 7,
+    "auto_backup": true
+  },
+  "session_management": {
+    "current_sessions": {},
+    "max_concurrent_sessions": 50,
+    "session_timeout_minutes": 30
+  },
+  "security": {
+    "rate_limiting": {
+      "max_uploads_per_hour": 50,
+      "max_downloads_per_hour": 100,
+      "enable_anti_spam": true
+    },
+    "validation": {
+      "validate_user_ids": true,
+      "prevent_duplicate_users": true,
+      "sanitize_usernames": true
+    }
+  },
+  "metadata": {
+    "created": "2024-01-01T00:00:00Z",
+    "last_modified": "2024-01-01T00:00:00Z",
+    "version": "1.0",
+    "schema_version": "1.0"
   }
 }
- 
