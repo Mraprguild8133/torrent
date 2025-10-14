@@ -1,36 +1,3 @@
 {
-  "users": {
-    "admin": {
-      "id": 0,
-      "username": "admin",
-      "added_date": "2024-01-01",
-      "permissions": ["all"],
-      "role": "administrator"
-    }
-  },
-  "settings": {
-    "max_users": 100,
-    "auto_cleanup_days": 30,
-    "default_permissions": ["upload", "download", "stream"],
-    "admin_permissions": ["all", "user_management", "file_deletion", "statistics"]
-  },
-  "statistics": {
-    "total_users": 1,
-    "active_users": 1,
-    "last_user_added": null,
-    "last_user_removed": null,
-    "user_additions_today": 0,
-    "user_removals_today": 0
-  },
-  "backup": {
-    "last_backup": null,
-    "backup_interval_hours": 24,
-    "keep_backups": 7
-  },
-  "metadata": {
-    "created": "2024-01-01T00:00:00Z",
-    "last_modified": "2024-01-01T00:00:00Z",
-    "version": "1.0",
-    "schema_version": "1.0"
   }
 }
