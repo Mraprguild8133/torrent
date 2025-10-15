@@ -20,5 +20,9 @@ class Config:
     # Web Server Configuration
     WEB_SERVER_URL = os.environ.get("WEB_SERVER_URL", "http://localhost:8000")
 
+# GPLinks.in Configuration
+GPLINKS_API_KEY = "c1332c0b286628ba047359efde6a5bdac1509655"  # Get from https://gplinks.in/member/tools/api
+AUTO_SHORTEN = True  # Set to False to disable auto-shortening
+
 # Create config instance
 config = Config()
