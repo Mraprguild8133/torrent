@@ -1,5 +1,6 @@
 import os
 import time
+import json 
 import math
 import asyncio
 import logging
@@ -534,14 +535,14 @@ async def handle_callback_query(client, callback_query):
     try:
         # Parse callback data (format: "action_id")
         if '_' not in data:
-            await callback_query.answer("❌ Invalid button data", show_alert=false)
+            await callback_query.answer("❌ Invalid button data", show_alert=False)
             return
             
         action, file_id = data.split('_', 1)
         filename = callback_data.get_file(file_id)
         
         if not filename:
-            await callback_query.answer("❌ File data expired", show_alert=false)
+            await callback_query.answer("❌ File data expired", show_alert=False)
             return
         
         logger.info(f"Callback: {action} for file: {filename}")
