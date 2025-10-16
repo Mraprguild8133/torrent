@@ -534,14 +534,14 @@ async def handle_callback_query(client, callback_query):
     try:
         # Parse callback data (format: "action_id")
         if '_' not in data:
-            await callback_query.answer("❌ Invalid button data", show_alert=True)
+            await callback_query.answer("❌ Invalid button data", show_alert=false)
             return
             
         action, file_id = data.split('_', 1)
         filename = callback_data.get_file(file_id)
         
         if not filename:
-            await callback_query.answer("❌ File data expired", show_alert=True)
+            await callback_query.answer("❌ File data expired", show_alert=false)
             return
         
         logger.info(f"Callback: {action} for file: {filename}")
