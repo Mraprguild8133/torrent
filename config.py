@@ -20,7 +20,7 @@ class Config:
         self.ADMIN_ID = self._get_required_int("ADMIN_ID")
         
         # Web Server Configuration
-        self.WEB_SERVER_URL = os.environ.get("https://storagebot-olr3.onrender.com")
+        self.WEB_SERVER_URL = os.environ.get("WEB_SERVER_URL", "http://localhost:8000")
         
         # GPLinks Configuration
         self.GPLINKS_API_KEY = os.environ.get("GPLINKS_API_KEY", "c1332c0b286628ba047359efde6a5bdac1509655")
